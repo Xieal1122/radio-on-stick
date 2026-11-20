@@ -22,8 +22,12 @@ if [ ! -x "$CHROME" ]; then
 fi
 nohup "$CHROME" \
   --headless=new \
+  --remote-debugging-port=9690 \
   --no-sandbox \
   --disable-gpu \
+  --disable-background-timer-throttling \
+  --disable-renderer-backgrounding \
+  --disable-backgrounding-occluded-windows \
   --autoplay-policy=no-user-gesture-required \
   --user-data-dir="$PROFILE" \
   --no-first-run --no-default-browser-check \

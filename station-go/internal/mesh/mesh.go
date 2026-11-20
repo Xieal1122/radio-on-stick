@@ -213,6 +213,18 @@ func (h *Hub) isLocalSeedOnly() bool {
 	return h.localSeedOnly
 }
 
+// In p2p-only mode the station host seed is the only HTTP source. Requiring a
+// second upstream before a listener can relay would make the first listener a
+// leaf forever, collapsing the whole audience onto one seed connection.
+// One healthy upstream is enough to start relaying; a second is added when
+// available for resilience.
+func (h *Hub) requiredParents() int {
+	if h.localSeedOnly {
+		return 1
+	}
+	return minParents
+}
+
 func localRequest(r *http.Request) bool {
 	if r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Real-IP") != "" {
 		return false
@@ -421,7 +433,7 @@ func (h *Hub) candidatesFor(child *Node) []*Node {
 		if !candidate.CanRelay || candidate.ID == child.ID {
 			continue
 		}
-		if candidate.Role == "child" && len(candidate.Parents) < minParents {
+		if candidate.Role == "child" && len(candidate.Parents) < h.requiredParents() {
 			continue
 		}
 		if child.Parents[candidate.ID] || len(candidate.Children) >= maxChildren {
@@ -485,7 +497,7 @@ func (h *Hub) ensureParents(child *Node, reason string) {
 		}
 		h.addParent(child, candidate, reason)
 	}
-	if len(child.Parents) < minParents {
+	if len(child.Parents) < h.requiredParents() {
 		if !child.Waiting {
 			child.Waiting = true
 			code := "need_second_parent"
@@ -586,7 +598,7 @@ func (h *Hub) hello(node *Node, message map[string]any) {
 	}
 	h.send(node, map[string]any{
 		"type": "welcome", "id": node.ID, "role": role, "preferred_role": preferred,
-		"capacity": maxChildren, "max_parents": maxParents, "min_parents": minParents,
+		"capacity": maxChildren, "max_parents": maxParents, "min_parents": h.requiredParents(),
 		"can_relay": canRelay,
 		"source": map[string]any{"manifest_url": "/source/manifest", "chunk_url": "/source/chunk"},
 	})

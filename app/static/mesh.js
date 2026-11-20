@@ -1061,17 +1061,9 @@
   }
 
   function armMeshFallbackTimer() {
+    // P2P-only mode has no legal HTTP media path. A child with one parent is
+    // valid and must keep that parent; never switch to the server HTTP leaf.
     clearMeshFallbackTimer();
-    if (!active || role === "seed") return;
-    meshFallbackTimer = setTimeout(() => {
-      meshFallbackTimer = null;
-      if (!active || role === "http") return;
-      if (role === "seed") return;
-      // A child must have two independent relay parents.  Keep the surviving
-      // parent during a reparent window, but do not remain a one-parent child:
-      // fall back to the server HTTP leaf if the second link does not appear.
-      if (openParentCount() < 2) enableHttpLeaf("need-two-parents");
-    }, 9000);
   }
 
   function applyRole(nextRole) {
@@ -1246,15 +1238,10 @@
       return false;
     }
     if (!meshSupported()) {
-      // A browser without WebRTC cannot be a real DataChannel child.  It
-      // still gets the shared server stream over HTTP, which keeps playback
-      // working without pretending that a mesh edge exists.
-      role = "http";
-      nodeId = null;
-      manualClose = true;
-      startSource();
-      updateMode(true);
-      return true;
+      // VPS media is disabled. A browser without WebRTC cannot receive P2P
+      // audio; fail explicitly instead of pulling /source through the relay.
+      failMesh("webrtc_unsupported");
+      return false;
     }
     manualClose = false;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
