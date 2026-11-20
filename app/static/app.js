@@ -360,6 +360,18 @@ function refreshStatus() {
     setPill(state.now && state.now.track ? "live" : "connecting", state.now && state.now.track ? "已同步" : "待开播");
     return;
   }
+  if (
+    audio.srcObject &&
+    !audio.paused &&
+    audio.readyState >= 2 &&
+    state.userWantsPlay
+  ) {
+    // RTP-track playback has no MSE buffer metrics; the element itself is the
+    // source of truth once the remote audio track is playing.
+    state.audioState = "live";
+    setPill("live", "已同步");
+    return;
+  }
   if (state.audioState === "buffering") {
     setPill("buffering", "缓冲中");
     return;
@@ -1193,6 +1205,14 @@ function loadSource(positionMs) {
 }
 
 if (mesh) {
+  if (mesh.setLiveCallback) {
+    mesh.setLiveCallback(() => {
+      if (!state.userWantsPlay) return;
+      state.audioState = "live";
+      updateAudioMode();
+      refreshStatus();
+    });
+  }
   mesh.setFallbackCallback(() => {
     if (!state.now || !state.now.track) return;
     if (state.mediaMode === "p2p") {
@@ -3419,6 +3439,19 @@ setView("queue");
 setPage("playback");
 setLyricsOpen(false);
 
+for (const element of [audioA, audioB]) {
+  element.addEventListener("playing", () => {
+    if (!state.userWantsPlay || state.serverPaused) return;
+    state.audioState = "live";
+    refreshStatus();
+    updateAudioMode();
+  });
+  element.addEventListener("waiting", () => {
+    if (!state.userWantsPlay || state.serverPaused) return;
+    state.audioState = "buffering";
+    refreshStatus();
+  });
+}
 const savedVolume = storageGet("radio.volume");
 if (savedVolume !== null) volumeEl.value = savedVolume;
 const initialVolume = Number(volumeEl.value);

@@ -36,6 +36,10 @@
   const audioEl = document.getElementById("audio");
   const audioModeEl = document.getElementById("audioMode");
   const params = new URLSearchParams(location.search);
+  // WebRTC audio tracks (RTP) instead of application-level frame chunks on an
+  // SCTP DataChannel. This is the transport used by Pion/mediasoup/LiveKit:
+  // the browser owns jitter buffering, NACK/FEC and congestion control.
+  const TRACK_MODE = params.get("tracks") !== "0";
 
   let preferredRole = "child";
   let canRelay = true;
@@ -102,6 +106,14 @@
   let lastResyncAt = 0;
   let stallTimes = [];
   let sourceToken = 0;
+  let localAudioTrack = null;
+  let localAudioStream = null;
+  let audioContext = null;
+  let audioSourceNode = null;
+  let audioDestination = null;
+  let activeAudioParent = null;
+  let activeAudioStream = null;
+  let liveCallback = null;
 
   const upstreams = new Map();
   const downstreams = new Map();
@@ -514,6 +526,8 @@
     accepted.bytes += raw.byteLength;
     currentStream.lastDurationMs = frame.durationMs;
 
+    // The seed's local audio element is the RTP source for downstreams.
+    if (TRACK_MODE) ensureLocalAudioTrack();
     // Relay the original bytes before handing them to the media pipeline.
     forwardFrame(raw);
     queuePayload(frame.payload, frame);
@@ -551,7 +565,119 @@
     }
   }
 
+  function ensureLocalAudioTrack() {
+    if (!TRACK_MODE) return null;
+    if (localAudioTrack && localAudioTrack.readyState === "live") {
+      return localAudioTrack;
+    }
+    // A MediaStreamAudioDestinationNode gives us one continuous RTP track
+    // while the underlying <audio> element swaps songs. captureStream() can
+    // end its track on every source change, which breaks a long P2P session.
+    try {
+      if (!audioContext && (window.AudioContext || window.webkitAudioContext)) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        audioContext = new Ctx();
+        audioSourceNode = audioContext.createMediaElementSource(audioEl);
+        audioDestination = audioContext.createMediaStreamDestination();
+        audioSourceNode.connect(audioDestination);
+        audioSourceNode.connect(audioContext.destination);
+        audioContext.resume().catch(() => {});
+      }
+      if (audioDestination) {
+        localAudioStream = audioDestination.stream;
+        localAudioTrack = localAudioStream.getAudioTracks()[0] || null;
+      }
+    } catch (_) {
+      audioContext = null;
+      audioSourceNode = null;
+      audioDestination = null;
+    }
+    if (!localAudioTrack) {
+      try {
+        const stream = audioEl.captureStream
+          ? audioEl.captureStream()
+          : audioEl.mozCaptureStream
+            ? audioEl.mozCaptureStream()
+            : null;
+        localAudioStream = stream || null;
+        localAudioTrack = stream && stream.getAudioTracks
+          ? stream.getAudioTracks()[0] || null
+          : null;
+      } catch (_) {
+        localAudioTrack = null;
+      }
+    }
+    if (localAudioTrack) {
+      for (const link of downstreams.values()) {
+        if (link.audioSender) {
+          link.audioSender.replaceTrack(localAudioTrack).catch(() => {});
+        }
+      }
+    }
+    return localAudioTrack;
+  }
+
+  function markLive() {
+    if (typeof liveCallback === "function") {
+      try {
+        liveCallback();
+      } catch (_) {
+        /* UI callback is best-effort */
+      }
+    }
+  }
+
+  function selectAudioParent() {
+    if (!TRACK_MODE) return;
+    let selected = activeAudioParent ? upstreams.get(activeAudioParent) : null;
+    if (!selected || !selected.audioStream) {
+      selected = null;
+      for (const link of upstreams.values()) {
+        if (link.audioStream && link.pc.connectionState !== "failed") {
+          selected = link;
+          break;
+        }
+      }
+    }
+    if (!selected) {
+      if (activeAudioParent) {
+        activeAudioParent = null;
+        activeAudioStream = null;
+        try {
+          audioEl.srcObject = null;
+        } catch (_) {
+          /* ignore */
+        }
+        updateMode();
+      }
+      return;
+    }
+    if (activeAudioParent === selected.id && activeAudioStream === selected.audioStream) {
+      ensureLocalAudioTrack();
+      return;
+    }
+    activeAudioParent = selected.id;
+    activeAudioStream = selected.audioStream;
+    try {
+      audioEl.pause();
+      audioEl.removeAttribute("src");
+      audioEl.srcObject = selected.audioStream;
+      audioEl.load();
+      audioEl.play().catch(() => {
+        /* the user gesture/attemptPlay path retries this */
+      });
+    } catch (_) {
+      /* keep the old media if this browser cannot attach a track */
+    }
+    ensureLocalAudioTrack();
+    markLive();
+    updateMode();
+  }
+
   function forwardFrame(raw) {
+    // In RTP track mode the browser's RTP stack forwards media; SCTP frames
+    // must not duplicate the same audio.
+    if (TRACK_MODE) return;
     if (!downstreams.size) return;
     for (const link of downstreams.values()) enqueueDownstream(link, raw);
   }
@@ -572,6 +698,17 @@
       reportTimer: null,
     };
     upstreams.set(parentId, link);
+    if (TRACK_MODE) {
+      pc.ontrack = (event) => {
+        link.audioTrack = event.track || null;
+        link.audioStream = event.streams && event.streams[0]
+          ? event.streams[0]
+          : event.track
+            ? new MediaStream([event.track])
+            : null;
+        selectAudioParent();
+      };
+    }
     pc.ondatachannel = (event) => {
       const dc = event.channel;
       link.dc = dc;
@@ -629,6 +766,16 @@
       reportTimer: null,
     };
     downstreams.set(childId, link);
+    if (TRACK_MODE) {
+      try {
+        const transceiver = pc.addTransceiver("audio", { direction: "sendrecv" });
+        link.audioSender = transceiver.sender;
+        const track = ensureLocalAudioTrack();
+        if (track) link.audioSender.replaceTrack(track).catch(() => {});
+      } catch (error) {
+        debug("audio transceiver failed", error);
+      }
+    }
     // A paused seed must still fetch and forward for its children.
     if (active && role === "seed" && !sourcePump) startSource();
     pc.onicecandidate = (event) => {
@@ -691,6 +838,7 @@
       /* ignore */
     }
     upstreams.delete(parentId);
+    if (activeAudioParent === parentId) selectAudioParent();
     send({ type: "upstream-lost", parent_id: parentId });
     if (active && role === "child" && openParentCount() < 2) armMeshFallbackTimer();
     updateMode();
@@ -721,6 +869,7 @@
       /* ignore */
     }
     upstreams.delete(parentId);
+    if (activeAudioParent === parentId) selectAudioParent();
     if (report) send({ type: "upstream-lost", parent_id: parentId });
     if (active && role === "child" && openParentCount() < 2) armMeshFallbackTimer();
     updateMode();
@@ -1237,6 +1386,7 @@
       failMesh("unsupported");
       return false;
     }
+    if (TRACK_MODE) ensureLocalAudioTrack();
     if (!meshSupported()) {
       // VPS media is disabled. A browser without WebRTC cannot receive P2P
       // audio; fail explicitly instead of pulling /source through the relay.
@@ -1444,6 +1594,9 @@
       source: sourcePump
         ? { streamId: sourcePump.manifest && sourcePump.manifest.stream_id, nextSeq: sourcePump.nextSeq }
         : null,
+      trackMode: TRACK_MODE,
+      audioParent: activeAudioParent,
+      audioTrack: localAudioTrack ? localAudioTrack.readyState : null,
       fallbackReason,
       lastError,
     };
@@ -1453,11 +1606,26 @@
     fallbackCallback = typeof callback === "function" ? callback : null;
   }
 
+  function setLiveCallback(callback) {
+    liveCallback = typeof callback === "function" ? callback : null;
+    if (liveCallback && activeAudioParent) markLive();
+  }
+
   function shutdown() {
     stopSource();
     resetMedia();
     active = false;
     leaveMesh();
+  }
+
+  if (TRACK_MODE) {
+    audioEl.addEventListener("playing", () => {
+      if (audioContext && audioContext.state === "suspended") {
+        audioContext.resume().catch(() => {});
+      }
+      ensureLocalAudioTrack();
+      markLive();
+    });
   }
 
   window.addEventListener("beforeunload", () => {
@@ -1486,6 +1654,7 @@
     fail: failMesh,
     shutdown,
     setFallbackCallback,
+    setLiveCallback,
     isActive: () => active,
     isSupported: mseSupported,
   };
