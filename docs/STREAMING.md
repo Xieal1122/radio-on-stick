@@ -42,3 +42,15 @@ listener <audio> --WebAudio destination--> RTP track -> child listener
 
 The implementation deliberately does not add Pion/mediasoup/LiveKit as a
 server-side SFU: the VPS is rendezvous-only, so media must remain browser P2P.
+
+
+## Preloading
+
+The library queue is shuffled once when rebuilt and `next_auto` is exposed to
+the client, so the next random track is stable. The client preloads the next
+track's cover and lyrics only.
+
+Audio itself is not preloaded in p2p mode: fetching `/native` or `/source`
+before the switch would send media through the VPS, which is forbidden. The
+RTP track has a continuous browser jitter buffer; avoiding a second HTTP audio
+path is the deliberate tradeoff.
