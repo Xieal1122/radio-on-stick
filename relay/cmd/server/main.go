@@ -171,6 +171,12 @@ func env(key, fallback string) string {
 	return fallback
 }
 
+func isMediaPath(path string) bool {
+	return strings.HasPrefix(path, "/native/") ||
+		strings.HasPrefix(path, "/source/") ||
+		strings.HasPrefix(path, "/media/")
+}
+
 func main() {
 	token := os.Getenv("RELAY_TOKEN")
 	if token == "" {
@@ -195,9 +201,20 @@ func main() {
 	go acceptStations(tlsListener, r, token)
 
 	httpAddr := env("RELAY_HTTP_ADDR", "127.0.0.1:18081")
+	allowMedia := env("RELAY_ALLOW_MEDIA", "0") == "1"
+	handler := http.HandlerFunc(r.proxy)
+	if !allowMedia {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if isMediaPath(req.URL.Path) {
+				http.Error(w, "media must use the station direct endpoint", http.StatusForbidden)
+				return
+			}
+			r.proxy(w, req)
+		})
+	}
 	server := &http.Server{
 		Addr:              httpAddr,
-		Handler:           http.HandlerFunc(r.proxy),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

@@ -131,6 +131,8 @@ const state = {
   pollTimer: null,
   connection: "connecting",
   audioState: "idle",
+  mediaMode: "p2p",
+  p2pRetryTimer: null,
   serverPaused: false,
   sidebarLoading: false,
   showTranslation: true,
@@ -178,11 +180,11 @@ const state = {
 // pull audio straight from this server's /native endpoint.
 const LOCAL_DIRECT = new URLSearchParams(location.search).get("direct") === "1";
 const FORCE_P2P = new URLSearchParams(location.search).get("p2p") === "1";
+const AUTO_SEED = new URLSearchParams(location.search).get("seed") === "1";
 // Edge has repeatedly underrun the MP3 MSE/P2P path while Safari's native
 // HTTP path stays smooth. Prefer native playback on Edge; ?p2p=1 remains an
 // explicit opt-in for diagnosing WebRTC.
-const EDGE_NATIVE = /\bEdg\//i.test(navigator.userAgent) && !FORCE_P2P;
-const mesh = LOCAL_DIRECT || EDGE_NATIVE ? null : window.RadioMesh || null;
+const mesh = LOCAL_DIRECT ? null : window.RadioMesh || null;
 
 function coverSource(url) {
   const raw = String(url || "").trim();
@@ -546,6 +548,7 @@ function loadTheme() {
 
 function applyConfig(config) {
   state.uiConfig = config;
+  state.mediaMode = config && config.media_mode === "p2p" ? "p2p" : "direct";
   stationName.textContent = config.station_name || "猫娘电台";
   stationSubtitle.textContent = config.subtitle || "";
   // The top bar stays compact; the subtitle lives in the browser tab as
@@ -1147,6 +1150,11 @@ function updateAudioMode() {
 }
 
 function loadDirectSource(positionMs) {
+  if (state.mediaMode === "p2p") {
+    state.audioState = "error";
+    refreshStatus();
+    return;
+  }
   if (mesh) mesh.stop();
   if (!state.sources.length) {
     updateAudioMode();
@@ -1175,6 +1183,11 @@ function loadSource(positionMs) {
     updateAudioMode();
     return true;
   }
+  if (state.mediaMode === "p2p") {
+    state.audioState = "error";
+    refreshStatus();
+    return false;
+  }
   loadDirectSource(positionMs);
   return false;
 }
@@ -1182,6 +1195,20 @@ function loadSource(positionMs) {
 if (mesh) {
   mesh.setFallbackCallback(() => {
     if (!state.now || !state.now.track) return;
+    if (state.mediaMode === "p2p") {
+      // Never fall back to /native through the VPS. Retry the P2P mesh; a
+      // local host seed or a peer relay is the only legal media source.
+      state.audioState = "buffering";
+      refreshStatus();
+      clearTimeout(state.p2pRetryTimer);
+      state.p2pRetryTimer = setTimeout(() => {
+        if (state.userWantsPlay && state.sources.length) {
+          loadSource(currentPosition());
+          attemptPlay();
+        }
+      }, 2500);
+      return;
+    }
     const direct = (state.now.audio && state.now.audio.direct) || "";
     const alternates = (state.now.audio && state.now.audio.alternates) || [];
     state.sources = [direct, ...alternates].filter(Boolean);
@@ -1324,6 +1351,7 @@ function fadeToNewAudio(oldElement, newElement) {
 }
 
 function fallbackToSingleElement(element, url, wasMesh, positionMs = 0) {
+  if (state.mediaMode === "p2p") return false;
   if (!element || !url) return false;
   const target = Math.max(0, Number(positionMs) || 0);
   try {
@@ -1444,6 +1472,7 @@ function adoptPreloaded(url, positionMs) {
 }
 
 function crossfadeToUrl(url, positionMs = 0) {
+  if (state.mediaMode === "p2p") return false;
   if (!url) return false;
   if (IS_IOS_SAFARI) {
     const wasMesh = Boolean(mesh && mesh.isActive());
@@ -1582,6 +1611,10 @@ function wireAudioElement(element) {
 }
 
 function preloadNext(now = state.now) {
+  if (state.mediaMode === "p2p") {
+    stopPreload();
+    return;
+  }
   const next = now && now.next;
   const url =
     next && next.audio
@@ -3362,6 +3395,11 @@ function loadAdminExtension() {
 
 /* ---------- init ---------- */
 
+if (AUTO_SEED) {
+  // A dedicated local host page can act as the initial P2P seed without a
+  // remote browser having to be promoted (which would route /source via VPS).
+  state.userWantsPlay = true;
+}
 loadNickname();
 if (!state.nickname && !IS_ADMIN_PAGE) {
   requestAnimationFrame(() => openNicknameModal());
