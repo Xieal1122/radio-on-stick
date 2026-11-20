@@ -35,6 +35,8 @@ type Source struct {
 	conn     *net.UDPConn
 	cmd      *exec.Cmd
 	peers    map[*webrtc.PeerConnection]struct{}
+	seq      uint16
+	timestamp uint32
 	stopOnce sync.Once
 }
 
@@ -55,6 +57,7 @@ func New(stun string) (*Source, error) {
 	return &Source{
 		api: api, track: track, stun: strings.TrimSpace(stun),
 		peers: map[*webrtc.PeerConnection]struct{}{},
+		seq: uint16(rand.Uint32()), timestamp: rand.Uint32(),
 	}, nil
 }
 
@@ -123,8 +126,6 @@ func (s *Source) start(track library.Track, input string, positionMS int64) erro
 func (s *Source) readLoop(conn *net.UDPConn, ctx context.Context) {
 	defer conn.Close()
 	buf := make([]byte, 2048)
-	var seq uint16 = uint16(rand.Uint32())
-	var timestamp uint32 = rand.Uint32()
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
 		n, _, err := conn.ReadFromUDP(buf)
@@ -141,13 +142,17 @@ func (s *Source) readLoop(conn *net.UDPConn, ctx context.Context) {
 		if packet.Unmarshal(buf[:n]) != nil || len(packet.Payload) == 0 {
 			continue
 		}
+		s.mu.Lock()
+		seq := s.seq
+		timestamp := s.timestamp
+		s.seq++
+		s.timestamp += opusFrameSamples
+		s.mu.Unlock()
 		packet.Header.SequenceNumber = seq
 		packet.Header.Timestamp = timestamp
 		packet.Header.SSRC = 1
 		packet.Header.PayloadType = 111
 		_ = s.track.WriteRTP(&packet)
-		seq++
-		timestamp += opusFrameSamples
 	}
 }
 
