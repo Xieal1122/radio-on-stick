@@ -199,7 +199,26 @@ func (i *Index) Search(query string, limit int) []Track {
 }
 
 func (i *Index) List(limit int) []Track {
-	return i.Search("", limit)
+	// Search is capped for UI/API callers; the station queue rebuild needs
+	// the full index. Keep this separate so a large library does not silently
+	// become a 20-track rotation after every restart.
+	if limit <= 0 || limit > 50000 {
+		limit = 50000
+	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	tracks := make([]Track, 0, min(limit, len(i.order)))
+	for _, id := range i.order {
+		track := i.tracks[id]
+		if track == nil {
+			continue
+		}
+		tracks = append(tracks, *track)
+		if len(tracks) >= limit {
+			break
+		}
+	}
+	return tracks
 }
 
 func (i *Index) Get(id string) (Track, bool) {

@@ -1762,8 +1762,11 @@ func main() {
 		}
 	}
 	state := station.New(index, env("RADIO_STATION_NAME", "Go Radio Station"))
-	state.Rebuild()
 	state.SetPersistPath(env("RADIO_GO_STATE", "data/station-go-state.json"))
+	// Rebuild after loading the persisted state. Rebuilding before
+	// SetPersistPath lets an empty/old saved queue overwrite the freshly
+	// indexed library, leaving the station with no current track after restart.
+	state.Rebuild()
 	if os.Getenv("RADIO_GO_KEEP_UPLOADS") != "1" {
 		state.SetAdvanceHook(func(track library.Track) {
 			path := filepath.Clean(track.Path)
