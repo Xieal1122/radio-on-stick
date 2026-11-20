@@ -19,7 +19,7 @@ The default media mode is `p2p`:
 
 - remote listeners load the control page through the VPS relay
 - WebSocket signaling also uses the VPS relay
-- audio comes only from the station host browser/headless seed or peer relays
+- audio comes only from the Go server RTP seed or peer relays
   over WebRTC DataChannels
 - the relay rejects `/native/`, `/source/` and `/media/`
 

@@ -682,7 +682,89 @@
     for (const link of downstreams.values()) enqueueDownstream(link, raw);
   }
 
+  function createServerUpstream() {
+    if (upstreams.has("server")) return upstreams.get("server");
+    const pc = new RTCPeerConnection(rtcConfig);
+    const link = {
+      id: "server",
+      pc,
+      dc: null,
+      open: false,
+      pendingIce: [],
+      chunks: 0,
+      bytes: 0,
+      lastSeq: null,
+      closed: false,
+      reportTimer: null,
+      audioTrack: null,
+      audioStream: null,
+    };
+    upstreams.set("server", link);
+    pc.ontrack = (event) => {
+      link.audioTrack = event.track || null;
+      link.audioStream = event.streams && event.streams[0]
+        ? event.streams[0]
+        : event.track
+          ? new MediaStream([event.track])
+          : null;
+      link.open = true;
+      selectAudioParent();
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+        link.open = false;
+        if (!link.closed) reportUpstreamLost("server");
+      }
+    };
+    try {
+      pc.addTransceiver("audio", { direction: "recvonly" });
+    } catch (error) {
+      debug("server audio transceiver failed", error);
+    }
+    const waitIce = () => new Promise((resolve) => {
+      if (pc.iceGatheringState === "complete") {
+        resolve();
+        return;
+      }
+      const check = () => {
+        if (pc.iceGatheringState === "complete") {
+          pc.removeEventListener("icegatheringstatechange", check);
+          resolve();
+        }
+      };
+      pc.addEventListener("icegatheringstatechange", check);
+      setTimeout(resolve, 3500);
+    });
+    pc.createOffer()
+      .then((offer) => pc.setLocalDescription(offer))
+      .then(waitIce)
+      .then(async () => {
+        if (!pc.localDescription) throw new Error("missing local description");
+        const response = await fetch("/api/server-rtc/offer", {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sdp: pc.localDescription.sdp }),
+        });
+        if (!response.ok) throw new Error(`server rtc ${response.status}`);
+        const answer = await response.json();
+        await pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
+      })
+      .catch((error) => {
+        debug("server upstream failed", error);
+        link.closed = true;
+        try {
+          pc.close();
+        } catch (_) {
+          /* ignore */
+        }
+        upstreams.delete("server");
+      });
+    return link;
+  }
+
   function createUpstream(parentId) {
+    if (parentId === "server") return createServerUpstream();
     if (upstreams.has(parentId)) return upstreams.get(parentId);
     const pc = new RTCPeerConnection(rtcConfig);
     const link = {

@@ -473,3 +473,12 @@ body.admin-console-open .modal { z-index: 140; }
   min-width: 0;
   line-height: 1.4;
 }
+
+.admin-danger-btn {
+  border-color: rgba(255, 110, 110, 0.35);
+  color: #ff9d9d;
+}
+.admin-danger-btn[data-closed="1"] {
+  color: #9fe3b7;
+  border-color: rgba(110, 230, 160, 0.35);
+}

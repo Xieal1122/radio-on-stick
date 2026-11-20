@@ -192,10 +192,30 @@ type Hub struct {
 	nextNumber    int
 	closed        bool
 	localSeedOnly bool
+	serverSeed    bool
 }
 
 func NewHub() *Hub {
 	return &Hub{nodes: map[string]*Node{}, seeds: map[string]bool{}}
+}
+
+// EnableServerSeed adds the Go server as a real RTP seed. It has no WebSocket
+// connection: browser children receive parent-added "server" and negotiate
+// directly with the station's Pion endpoint.
+func (h *Hub) EnableServerSeed() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.serverSeed {
+		return
+	}
+	h.serverSeed = true
+	server := &Node{
+		ID: "server", Role: "seed", CanRelay: true, Hello: true,
+		Parents: map[string]bool{}, Children: map[string]bool{},
+		JoinedAt: time.Now(), Blocked: map[string]time.Time{},
+	}
+	h.nodes[server.ID] = server
+	h.seeds[server.ID] = true
 }
 
 // SetLocalSeedOnly prevents a browser reached through a relay from becoming
@@ -232,6 +252,16 @@ func (h *Hub) requiredParents() int {
 	return minParents
 }
 
+func (h *Hub) requiredParentsFor(child *Node) int {
+	if h.serverSeed {
+		if child != nil && child.Parents["server"] {
+			return 1
+		}
+		return minParents
+	}
+	return h.requiredParents()
+}
+
 func localRequest(r *http.Request) bool {
 	if r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Real-IP") != "" {
 		return false
@@ -245,6 +275,9 @@ func localRequest(r *http.Request) bool {
 }
 
 func (h *Hub) send(node *Node, value any) bool {
+	if node == nil || node.Conn == nil {
+		return true
+	}
 	if err := node.Conn.sendJSON(value); err != nil {
 		node.Conn.closed = true
 		return false
@@ -324,6 +357,9 @@ func (h *Hub) serve(node *Node) {
 }
 
 func (h *Hub) targetSeedCount() int {
+	if h.serverSeed {
+		return 1
+	}
 	if h.localSeedOnly {
 		for _, node := range h.nodes {
 			if node.Local && node.Hello && node.CanRelay {
@@ -440,7 +476,7 @@ func (h *Hub) candidatesFor(child *Node) []*Node {
 		if !candidate.CanRelay || candidate.ID == child.ID {
 			continue
 		}
-		if candidate.Role == "child" && len(candidate.Parents) < h.requiredParents() {
+		if candidate.Role == "child" && len(candidate.Parents) < h.requiredParentsFor(candidate) {
 			continue
 		}
 		if child.Parents[candidate.ID] || len(candidate.Children) >= maxChildren {
@@ -460,6 +496,15 @@ func (h *Hub) candidatesFor(child *Node) []*Node {
 func (h *Hub) addParent(child, parent *Node, reason string) bool {
 	if !child.Hello || !parent.Hello || child.Role == "seed" || child.ID == parent.ID {
 		return false
+	}
+	// A direct server parent supersedes every peer parent. Keeping the old
+	// peer would leave a two-parent child whose server path is already enough.
+	if parent.ID == "server" {
+		for parentID := range child.Parents {
+			if parentID != "server" {
+				h.detach(parentID, child.ID, "server-parent", true, true)
+			}
+		}
 	}
 	if len(child.Parents) >= maxParents || len(parent.Children) >= maxChildren || !parent.CanRelay || child.Parents[parent.ID] {
 		return false
@@ -503,8 +548,15 @@ func (h *Hub) ensureParents(child *Node, reason string) {
 			break
 		}
 		h.addParent(child, candidate, reason)
+		if child.Parents["server"] {
+			break
+		}
 	}
-	if len(child.Parents) < h.requiredParents() {
+	if child.Parents["server"] {
+		child.Waiting = false
+		return
+	}
+	if len(child.Parents) < h.requiredParentsFor(child) {
 		if !child.Waiting {
 			child.Waiting = true
 			code := "need_second_parent"
@@ -526,6 +578,48 @@ func (h *Hub) topUpAll(reason string) {
 	}
 }
 
+func (h *Hub) reparentUp(child *Node, lostParentID string) bool {
+	lost := h.nodes[lostParentID]
+	if lost == nil || child == nil {
+		return false
+	}
+	var candidates []*Node
+	for id := range lost.Parents {
+		candidate := h.nodes[id]
+		if candidate == nil || candidate.ID == child.ID || !candidate.CanRelay || !candidate.Hello {
+			continue
+		}
+		if child.Parents[candidate.ID] || len(candidate.Children) >= maxChildren {
+			continue
+		}
+		if deadline, ok := child.Blocked[candidate.ID]; ok && deadline.After(time.Now()) {
+			continue
+		}
+		if h.isAncestor(child.ID, candidate.ID) {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	if len(candidates) == 0 {
+		return false
+	}
+	// If the server is among the grandparents, it wins and becomes the only
+	// parent (addParent detaches the previous peer parent). Otherwise move up
+	// to the grandparent with fewer children.
+	for _, candidate := range candidates {
+		if candidate.ID == "server" {
+			return h.addParent(child, candidate, "grandparent-server")
+		}
+	}
+	best := candidates[0]
+	for _, candidate := range candidates[1:] {
+		if len(candidate.Children) < len(best.Children) {
+			best = candidate
+		}
+	}
+	return h.addParent(child, best, "grandparent")
+}
+
 func (h *Hub) handle(node *Node, message map[string]any) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -544,9 +638,13 @@ func (h *Hub) handle(node *Node, message map[string]any) {
 	case "upstream-lost":
 		parentID, _ := message["parent_id"].(string)
 		if parentID != "" && node.Parents[parentID] {
+			lostParentID := parentID
 			h.detach(parentID, node.ID, "upstream-lost", true, false)
 			node.Blocked[parentID] = time.Now().Add(8 * time.Second)
 			node.Waiting = false
+			// Move up one level when a parent exits: choose a grandparent,
+			// preferably the server, then the grandparent with fewer children.
+			h.reparentUp(node, lostParentID)
 			h.ensureParents(node, "upstream-lost")
 			h.topUpAll("upstream-lost")
 		}
@@ -605,7 +703,7 @@ func (h *Hub) hello(node *Node, message map[string]any) {
 	}
 	h.send(node, map[string]any{
 		"type": "welcome", "id": node.ID, "role": role, "preferred_role": preferred,
-		"capacity": maxChildren, "max_parents": maxParents, "min_parents": h.requiredParents(),
+		"capacity": maxChildren, "max_parents": maxParents, "min_parents": h.requiredParentsFor(node),
 		"can_relay": canRelay,
 		"source": map[string]any{"manifest_url": "/source/manifest", "chunk_url": "/source/chunk"},
 	})

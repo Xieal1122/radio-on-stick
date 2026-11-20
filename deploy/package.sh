@@ -10,10 +10,10 @@ build() {
   local os="$1" arch="$2" ext="$3"
   local dir="$OUT/radio-go-${VERSION}-${STAMP}-${os}-${arch}"
   mkdir -p "$dir/bin"
-  (cd "$ROOT" && GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$dir/bin/radio-station-go${ext}" ./cmd/station)
-  (cd "$ROOT" && GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$dir/bin/radio-relay${ext}" ./cmd/relay)
-  (cd "$ROOT" && GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$dir/bin/radio-relay-agent${ext}" ./cmd/relay-agent)
-  (cd "$ROOT" && GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$dir/bin/radio-directory${ext}" ./cmd/directory)
+  (cd "$ROOT" && GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o "$dir/bin/radio-station-go${ext}" ./cmd/station)
+  (cd "$ROOT" && GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o "$dir/bin/radio-relay${ext}" ./cmd/relay)
+  (cd "$ROOT" && GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o "$dir/bin/radio-relay-agent${ext}" ./cmd/relay-agent)
+  (cd "$ROOT" && GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o "$dir/bin/radio-directory${ext}" ./cmd/directory)
   cp -a "$ROOT/web" "$dir/web"
   if [ -d "$ROOT/plugins" ]; then cp -a "$ROOT/plugins" "$dir/plugins"; fi
   cp "$ROOT/go.mod" "$ROOT/go.sum" "$ROOT/README.md" "$ROOT/LICENSE" "$dir/"

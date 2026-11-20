@@ -10,19 +10,19 @@ build: station relay directory relay-agent
 
 station:
 	mkdir -p $(BIN)
-	go build -trimpath -ldflags="-s -w" -o $(BIN)/radio-station-go ./cmd/station
+	go build -buildvcs=false -trimpath -ldflags="-s -w" -o $(BIN)/radio-station-go ./cmd/station
 
 relay:
 	mkdir -p $(BIN)
-	go build -trimpath -ldflags="-s -w" -o $(BIN)/radio-relay ./cmd/relay
+	go build -buildvcs=false -trimpath -ldflags="-s -w" -o $(BIN)/radio-relay ./cmd/relay
 
 relay-agent:
 	mkdir -p $(BIN)
-	go build -trimpath -ldflags="-s -w" -o $(BIN)/radio-relay-agent ./cmd/relay-agent
+	go build -buildvcs=false -trimpath -ldflags="-s -w" -o $(BIN)/radio-relay-agent ./cmd/relay-agent
 
 directory:
 	mkdir -p $(BIN)
-	go build -trimpath -ldflags="-s -w" -o $(BIN)/radio-directory ./cmd/directory
+	go build -buildvcs=false -trimpath -ldflags="-s -w" -o $(BIN)/radio-directory ./cmd/directory
 
 dist:
 	RADIO_VERSION=$(VERSION) bash deploy/package.sh

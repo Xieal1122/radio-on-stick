@@ -23,6 +23,7 @@ import (
 	"github.com/Xieal1122/radio-go/internal/library"
 	"github.com/Xieal1122/radio-go/internal/mesh"
 	"github.com/Xieal1122/radio-go/internal/plugins"
+	"github.com/Xieal1122/radio-go/internal/rtcseed"
 	"github.com/Xieal1122/radio-go/internal/station"
 	"github.com/Xieal1122/radio-go/internal/stream"
 )
@@ -35,6 +36,7 @@ type api struct {
 	state      *station.State
 	source     *stream.Hub
 	mesh       *mesh.Hub
+	rtc        *rtcseed.Source
 	meshSTUN   string
 	mediaMode  string
 	httpLeafMax int
@@ -657,6 +659,10 @@ func (a *api) mediaUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) sourceManifest(w http.ResponseWriter, r *http.Request) {
+	if a.state.IsClosed() {
+		writeJSON(w, 503, map[string]any{"error": "station_closed", "message": "电台已关闭"})
+		return
+	}
 	if !a.admitHTTPLeaf(w, r) {
 		return
 	}
@@ -678,6 +684,10 @@ func (a *api) sourceManifest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) sourceChunk(w http.ResponseWriter, r *http.Request) {
+	if a.state.IsClosed() {
+		writeJSON(w, 503, map[string]any{"error": "station_closed", "message": "电台已关闭"})
+		return
+	}
 	if !a.admitHTTPLeaf(w, r) {
 		return
 	}
@@ -805,6 +815,10 @@ func (a *api) coverProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) native(w http.ResponseWriter, r *http.Request) {
+	if a.state.IsClosed() {
+		writeJSON(w, 503, map[string]any{"error": "station_closed", "message": "电台已关闭"})
+		return
+	}
 	id := strings.TrimPrefix(r.URL.Path, "/native/")
 	track, ok := a.index.Get(id)
 	if !ok {
@@ -974,6 +988,7 @@ func (a *api) secure(next http.Handler) http.Handler {
 		"/admin.js": true, "/mesh.js": true, "/style.css": true,
 		"/admin.css": true, "/placeholder.svg": true, "/manifest.webmanifest": true,
 		"/sw.js": true, "/favicon.ico": true, "/healthz": true, "/api/config": true,
+		"/api/server-rtc/offer": true,
 		"/api/join": true, "/admin": true, "/admin/": true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1473,6 +1488,58 @@ func (a *api) adminLibraryScan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "tracks": count})
 }
 
+func (a *api) serverRTCOffer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method"})
+		return
+	}
+	if a.rtc == nil || a.state.IsClosed() {
+		writeJSON(w, 503, map[string]any{"error": "station_closed"})
+		return
+	}
+	var body struct {
+		SDP string `json:"sdp"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.SDP) == "" {
+		writeJSON(w, 400, map[string]any{"error": "bad_sdp"})
+		return
+	}
+	answer, err := a.rtc.Answer(body.SDP)
+	if err != nil {
+		writeJSON(w, 502, map[string]any{"error": "rtc_failed", "message": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"type": "answer", "sdp": answer})
+}
+
+func (a *api) adminStation(w http.ResponseWriter, r *http.Request) {
+	if !a.ownerIP(r) {
+		writeJSON(w, 403, map[string]any{"error": "not_owner"})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method"})
+		return
+	}
+	var body struct {
+		Closed bool `json:"closed"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": "bad_json"})
+		return
+	}
+	if body.Closed {
+		a.state.CloseStation()
+		a.source.Close()
+		if a.rtc != nil {
+			a.rtc.Stop()
+		}
+	} else {
+		a.state.ReopenStation()
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "closed": a.state.IsClosed()})
+}
+
 func (a *api) adminState(w http.ResponseWriter, r *http.Request) {
 	if !a.authorized(r) {
 		writeJSON(w, 401, map[string]any{"error": "unauthorized"})
@@ -1796,6 +1863,11 @@ func main() {
 	mediaMode := env("RADIO_MEDIA_MODE", "p2p")
 	meshHub := mesh.NewHub()
 	meshHub.SetLocalSeedOnly(mediaMode == "p2p")
+	meshHub.EnableServerSeed()
+	rtcSource, rtcErr := rtcseed.New(os.Getenv("RADIO_MESH_STUN"))
+	if rtcErr != nil {
+		log.Printf("rtc seed disabled: %v", rtcErr)
+	}
 	a := &api{
 		index:      index,
 		libraryDir: clean,
@@ -1803,6 +1875,7 @@ func main() {
 		state:      state,
 		source:     stream.NewHub(),
 		mesh:       meshHub,
+		rtc:        rtcSource,
 		meshSTUN:   os.Getenv("RADIO_MESH_STUN"),
 		mediaMode:  mediaMode,
 		staticDir:  env("RADIO_STATIC_DIR", "web/static"),
@@ -1843,6 +1916,8 @@ func main() {
 	mux.HandleFunc("/api/lyrics/", a.lyrics)
 	mux.HandleFunc("/api/admin/owner", a.adminOwner)
 	mux.HandleFunc("/api/admin/state", a.adminState)
+	mux.HandleFunc("/api/admin/station", a.adminStation)
+	mux.HandleFunc("/api/server-rtc/offer", a.serverRTCOffer)
 	mux.HandleFunc("/api/admin/directory", a.adminDirectory)
 	mux.HandleFunc("/api/admin/directory/invite", a.adminDirectory)
 	mux.HandleFunc("/api/admin/background", a.adminBackground)
@@ -1883,6 +1958,28 @@ func main() {
 		defer ticker.Stop()
 		for range ticker.C {
 			meshHub.Maintain()
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if rtcSource == nil {
+				continue
+			}
+			if a.state.IsClosed() {
+				rtcSource.Stop()
+				continue
+			}
+			track := a.state.Current()
+			if track.ID == "" {
+				continue
+			}
+			if track.URL == "" && !a.ensureTrackAudio(&track) {
+				continue
+			}
+			rtcSource.Ensure(track, a.state.PositionMS())
 		}
 	}()
 
