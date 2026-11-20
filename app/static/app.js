@@ -134,6 +134,7 @@ const state = {
   mediaMode: "p2p",
   p2pRetryTimer: null,
   serverPaused: false,
+  closed: false,
   sidebarLoading: false,
   showTranslation: true,
   nickname: "",
@@ -345,6 +346,10 @@ function setPill(kind, text) {
 }
 
 function refreshStatus() {
+  if (state.closed) {
+    setPill("offline", "电台已关闭");
+    return;
+  }
   if (state.connection === "offline") {
     setPill("offline", navigator.onLine ? "连接中断" : "离线");
     return;
@@ -1071,7 +1076,7 @@ window.addEventListener("radio:admin-nickname", (event) => {
 function updatePlayButton() {
   const hasTrack = Boolean(state.now && state.now.track);
   const playing = hasTrack && state.userWantsPlay && !audio.paused && !state.serverPaused;
-  playBtn.disabled = !hasTrack || state.serverPaused;
+  playBtn.disabled = !hasTrack || state.serverPaused || state.closed;
   playBtn.setAttribute("aria-label", playing ? "暂停" : "播放");
   playBtn.querySelector(".icon-play").classList.toggle("hidden", playing);
   playBtn.querySelector(".icon-pause").classList.toggle("hidden", !playing);
@@ -1760,6 +1765,27 @@ function applyNow(now) {
   );
   state.now = now;
   state.seq = now.seq;
+  if (now.closed) {
+    state.closed = true;
+    if (mesh) mesh.stop();
+    try {
+      audio.pause();
+      audio.srcObject = null;
+      audio.removeAttribute("src");
+      audio.load();
+    } catch (_) {
+      /* ignore */
+    }
+    state.sources = [];
+    state.sourceIndex = 0;
+    state.audioKey = null;
+    state.audioState = "idle";
+    clearStalledTimer();
+    updatePlayButton();
+    refreshStatus();
+    return;
+  }
+  state.closed = false;
   state.audioRev = now.audio_rev;
   state.serverPaused = Boolean(now.paused);
   updateListenerUI(now);
@@ -1870,6 +1896,9 @@ function applyNow(now) {
     attemptPlay();
   }
 
+  if (state.userWantsPlay && !audio.src && !audio.srcObject && state.sources.length) {
+    loadSource(currentPosition(now));
+  }
   syncPlaybackPosition(now);
   setLivePill();
   updatePlayButton();
@@ -3416,11 +3445,11 @@ function loadAdminExtension() {
   if (adminExtensionPromise) return adminExtensionPromise;
   const style = document.createElement("link");
   style.rel = "stylesheet";
-  style.href = "/admin.css?v=12";
+  style.href = "/admin.css?v=13";
   style.id = "adminExtensionStyle";
   document.head.appendChild(style);
   const script = document.createElement("script");
-  script.src = "/admin.js?v=37";
+  script.src = "/admin.js?v=39";
   script.id = "adminExtensionScript";
   adminExtensionPromise = new Promise((resolve, reject) => {
     script.onload = resolve;

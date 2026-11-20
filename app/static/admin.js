@@ -138,6 +138,12 @@
     // The dedicated nickname field lives above the panel body.
     nickname.classList.add("hidden");
     headActions.appendChild(nickname);
+    const power = el("button", "ghost-btn admin-danger-btn", "关闭电台");
+    power.id = "adminStationBtn";
+    power.type = "button";
+    power.classList.add("hidden");
+    power.addEventListener("click", toggleStation);
+    headActions.appendChild(power);
     const exit = el("button", "ghost-btn", "退出管理员");
     exit.id = "adminExitBtn";
     exit.type = "button";
@@ -319,6 +325,25 @@
     }
   }
 
+  async function toggleStation() {
+    if (!state.owner || !state.data) return;
+    const closed = Boolean(state.data.now && state.data.now.closed);
+    if (!closed) {
+      const ok = window.confirm("关闭电台后，所有听众会立即停止播放。确定关闭？");
+      if (!ok) return;
+    }
+    try {
+      await api("/api/admin/station", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ closed: !closed }),
+      });
+      await loadState(true);
+    } catch (error) {
+      setStatus("error", errorText(error, "操作失败"));
+    }
+  }
+
   function logout() {
     state.token = "";
     state.owner = false;
@@ -447,6 +472,13 @@
 
   function renderAll() {
     if (!state.data) return;
+    const stationBtn = $("adminStationBtn");
+    if (stationBtn) {
+      stationBtn.classList.toggle("hidden", !state.owner);
+      const closed = Boolean(state.data.now && state.data.now.closed);
+      stationBtn.textContent = closed ? "重新开台" : "关闭电台";
+      stationBtn.dataset.closed = closed ? "1" : "0";
+    }
     const libraryTab = document.querySelector('.admin-console-tab[data-tab="library"]');
     const hasLibrary = Boolean(state.data.library);
     if (libraryTab) libraryTab.classList.toggle("hidden", !hasLibrary);

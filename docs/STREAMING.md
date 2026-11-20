@@ -11,12 +11,13 @@ media arrives.
 
 ## Current transport
 
-`app/static/mesh.js` now uses one WebRTC **audio RTP track** per peer
-connection by default:
+The Go station exposes its own WebRTC Opus track through Pion
+(`internal/rtcseed`). `app/static/mesh.js` uses one WebRTC **audio RTP track**
+per peer connection:
 
 ```text
-station host <audio> --WebAudio destination--> RTP track -> listener
-listener <audio> --WebAudio destination--> RTP track -> child listener
+Go server ffmpeg -> Opus RTP -> Pion track -> browser listener
+browser listener <audio> --WebAudio destination--> RTP track -> child listener
 ```
 
 - `MediaStreamAudioDestinationNode` gives one continuous track while the

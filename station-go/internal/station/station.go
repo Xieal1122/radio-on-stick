@@ -105,6 +105,7 @@ type State struct {
 	settings    map[string]any
 	policy      map[string]any
 	persistPath string
+	closed      bool
 	listeners   int
 	onAdvance   func(library.Track)
 }
@@ -211,7 +212,7 @@ func (s *State) advanceLocked() {
 }
 
 func (s *State) tickLocked(now time.Time) {
-	if s.paused || s.current.ID == "" {
+	if s.closed || s.paused || s.current.ID == "" {
 		return
 	}
 	if s.current.DurationMS <= 0 {
@@ -515,7 +516,7 @@ func (s *State) SnapshotLocked() map[string]any {
 	return map[string]any{
 		"seq": s.seq, "audio_rev": s.audioRev, "server_time_ms": now.UnixMilli(),
 		"started_at_ms": startedMS, "position_ms": position,
-		"duration_ms": s.current.DurationMS, "paused": s.paused,
+		"duration_ms": s.current.DurationMS, "paused": s.paused, "closed": s.closed,
 		"track": entry(s.current), "next": next, "next_auto": nextAuto, "listeners": s.listeners,
 		"audio": map[string]any{"direct": direct},
 		"lyrics_url": lyricsURL,
@@ -888,6 +889,7 @@ func (s *State) SetPersistPath(path string) {
 			PausedPosition int64           `json:"paused_position_ms"`
 			Seq            int             `json:"seq"`
 			AudioRev       int             `json:"audio_rev"`
+			Closed         bool            `json:"closed"`
 		}
 		if json.Unmarshal(raw, &payload) == nil {
 			for key, value := range payload.Settings {
@@ -919,12 +921,49 @@ func (s *State) SetPersistPath(path string) {
 				s.pausedPosition = payload.PausedPosition
 				s.seq = payload.Seq
 				s.audioRev = payload.AudioRev
+				s.closed = payload.Closed
 			}
 		}
 		s.repairMetadataLocked()
 		s.saveLocked()
 	}
 	s.mu.Unlock()
+}
+
+func (s *State) IsClosed() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.closed
+}
+
+func (s *State) CloseStation() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
+	if s.current.ID != "" {
+		if !s.paused {
+			s.pausedPosition = time.Since(s.started).Milliseconds()
+		}
+		s.paused = true
+	}
+	s.saveLocked()
+}
+
+func (s *State) ReopenStation() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		return
+	}
+	s.closed = false
+	if s.current.ID != "" {
+		s.paused = false
+		s.started = time.Now().Add(-time.Duration(s.pausedPosition) * time.Millisecond)
+	}
+	s.saveLocked()
 }
 
 func saveTracks(tracks []library.Track) []savedTrack {
@@ -946,7 +985,7 @@ func (s *State) saveLocked() {
 		"current": saveTrack(s.current), "queue": saveTracks(s.queue),
 		"started_at_ms": s.started.UnixMilli(), "paused": s.paused,
 		"paused_position_ms": s.pausedPosition, "seq": s.seq,
-		"audio_rev": s.audioRev,
+		"audio_rev": s.audioRev, "closed": s.closed,
 	}, "", "  ")
 	_ = os.WriteFile(s.persistPath, raw, 0o600)
 }
