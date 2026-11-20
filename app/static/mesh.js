@@ -707,6 +707,7 @@
       lastPackets: 0,
       lastBytes: 0,
       silentReported: false,
+      sawPackets: false,
       audioTrack: null,
       audioStream: null,
     };
@@ -795,6 +796,7 @@
       lastPackets: 0,
       lastBytes: 0,
       silentReported: false,
+      sawPackets: false,
     };
     upstreams.set(parentId, link);
     if (TRACK_MODE) {
@@ -940,10 +942,15 @@
       if (link.closed || !link.pc) continue;
       let packets = 0;
       let bytes = 0;
+      let audioReport = false;
       try {
         const stats = await link.pc.getStats();
         stats.forEach((report) => {
-          if (report.type === "inbound-rtp" && report.kind === "audio") {
+          if (
+            report.type === "inbound-rtp" &&
+            (report.kind === "audio" || report.mediaType === "audio")
+          ) {
+            audioReport = true;
             packets += Number(report.packetsReceived) || 0;
             bytes += Number(report.bytesReceived) || 0;
           }
@@ -951,6 +958,11 @@
       } catch (_) {
         continue;
       }
+      // Do not turn a browser that has never reported an inbound audio stat
+      // into a false parent-loss event. The 60s server fallback still covers
+      // browsers where getStats is incomplete.
+      if (!audioReport) continue;
+      if (packets > 0 || bytes > 0) link.sawPackets = true;
       if (packets > link.lastPackets || bytes > link.lastBytes) {
         link.lastPackets = Math.max(link.lastPackets, packets);
         link.lastBytes = Math.max(link.lastBytes, bytes);
@@ -959,6 +971,7 @@
         continue;
       }
       if (
+        link.sawPackets &&
         !link.silentReported &&
         now - link.createdAt > PARENT_GRACE_MS &&
         now - link.lastProgressAt > PARENT_SILENCE_MS
