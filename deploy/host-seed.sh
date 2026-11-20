@@ -31,6 +31,6 @@ nohup "$CHROME" \
   --autoplay-policy=no-user-gesture-required \
   --user-data-dir="$PROFILE" \
   --no-first-run --no-default-browser-check \
-  "http://$ADDR/admin?seed=1" >>"$LOG" 2>&1 &
+  "http://$ADDR/admin?seed=1&tracks=1" >>"$LOG" 2>&1 &
 echo $! > "$PIDFILE"
 echo "host seed started: $(cat "$PIDFILE")"
