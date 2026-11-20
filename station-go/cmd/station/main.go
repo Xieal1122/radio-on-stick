@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"os/exec"
 	"path/filepath"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"radio-on-stick/station-go/internal/directory"
@@ -1868,6 +1870,15 @@ func main() {
 	if rtcErr != nil {
 		log.Printf("rtc seed disabled: %v", rtcErr)
 	}
+	stopSignals := make(chan os.Signal, 1)
+	signal.Notify(stopSignals, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-stopSignals
+		if rtcSource != nil {
+			rtcSource.Stop()
+		}
+		os.Exit(0)
+	}()
 	a := &api{
 		index:      index,
 		libraryDir: clean,
@@ -1954,9 +1965,15 @@ func main() {
 	mux.HandleFunc("/api/admin/library", a.adminLibrary)
 	mux.HandleFunc("/api/admin/library/scan", a.adminLibraryScan)
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
+		seconds := envInt("RADIO_MESH_MAINTENANCE_SEC", 60)
+		if seconds < 15 {
+			seconds = 15
+		}
+		ticker := time.NewTicker(time.Duration(seconds) * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
+			// Fallback only. Immediate reparenting is driven by the child's
+			// per-parent packet-silence report over WebSocket.
 			meshHub.Maintain()
 		}
 	}()

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/pion/rtp"
@@ -101,6 +102,9 @@ func (s *Source) start(track library.Track, input string, positionMS int64) erro
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	// Keep the encoder in its own process group so station shutdown cannot
+	// leave an orphan ffmpeg writing to a closed RTP socket.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -212,6 +216,9 @@ func (s *Source) Stop() {
 
 func (s *Source) stopLocked() {
 	s.key = ""
+	if s.cmd != nil && s.cmd.Process != nil {
+		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+	}
 	if s.cancel != nil {
 		s.cancel()
 		s.cancel = nil
