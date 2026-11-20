@@ -80,3 +80,6 @@ app/sources/private_impl/
 
 # Private commercial plugin implementations
 private/
+
+# Standalone Go-first project (separate git repository)
+go-radio/

@@ -1,3 +1,5 @@
+> **Go-first project:** [`go-radio/`](go-radio/) is the standalone Go rewrite (station, directory, relay, relay agent, web assets, deploy files). It has its own `go.mod` and its own git repository; the Python app below remains the legacy implementation. Read [`go-radio/docs/VPS_ROLE.md`](go-radio/docs/VPS_ROLE.md) before deploying — the intended VPS role is rendezvous only, not audio.
+
 # Radio on Stick
 
 运行在小内存 Debian 设备上的轻量 web 电台。服务器是唯一音频源：服务器从第三方音频链接取流，两个种子设备经 HTTP 取块，再通过 WebRTC DataChannel 网状转发给其他听众；浏览器不会直连第三方音频地址。所有音频默认由 ffmpeg 转为低码率 MP3 再分发（`RADIO_TRANSCODE_MP3=0` 可让 MP3 直通），不使用 Icecast/Liquidsoap/Docker。第三方音频不落盘；用户主动上传的本地音频临时保存在 `data/uploads/`（可随时清空），这是唯一的音频存储例外。
