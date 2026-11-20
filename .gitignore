@@ -1,0 +1,47 @@
+# Runtime data and releases
+data/
+dist/
+build/
+*.pid
+*.log
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# Private commercial source helper (optional; not redistributed)
+plugins/commercial/helper.py
+plugins/commercial/app/sources/private_impl/
+plugins/commercial/app/__pycache__/
+plugins/commercial/app/sources/__pycache__/
+
+# Audio/background assets and uploads
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.wav
+*.ogg
+*.webp
+*.jpg
+*.jpeg
+*.png
+!web/static/*.png
+!web/static/*.jpg
+!web/static/*.svg
+!web/directory/**/*.png
+!web/directory/**/*.jpg
+!web/directory/**/*.svg
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Optional private commercial runtime and helper
+plugins/commercial/*
+!plugins/commercial/README.md

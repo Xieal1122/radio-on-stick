@@ -1,0 +1,21 @@
+# Rendezvous-only VPS layout.
+# The station itself MUST be reachable directly (public HTTPS, tunnel, or LAN)
+# and its direct URL must be registered as RADIO_DIRECTORY_PUBLIC_URL.
+# Do not put a station.audio domain behind the relay if VPS bandwidth is not
+# intended for media.
+
+join.example.com {
+    encode gzip
+    reverse_proxy 127.0.0.1:8787
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+}
+
+# Optional control/join relay. Media paths are rejected by the relay unless
+# RELAY_ALLOW_MEDIA=1, so this endpoint cannot become an audio path.
+relay.example.com {
+    encode gzip
+    reverse_proxy 127.0.0.1:18081 {
+        flush_interval -1
+    }
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+}

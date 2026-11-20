@@ -1,0 +1,15 @@
+[Unit]
+Description=radio-go station relay agent
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/radio-go
+EnvironmentFile=/etc/radio-go/relay-agent.env
+ExecStart=/opt/radio-go/bin/radio-relay-agent
+Restart=always
+RestartSec=3
+User=radio
+Group=radio
+
+[Install]
+WantedBy=multi-user.target
