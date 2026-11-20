@@ -15,10 +15,17 @@ NOT VPS:
   audio WebSocket data channels / P2P payload
 ```
 
-The station must expose its own direct HTTPS endpoint (public IP, Cloudflare
-Tunnel, or a campus/LAN endpoint) and register that URL as
-`RADIO_DIRECTORY_PUBLIC_URL`. Listeners connect directly to the station for the
-web app and media; P2P signaling may use the VPS.
+The default media mode is `p2p`:
+
+- remote listeners load the control page through the VPS relay
+- WebSocket signaling also uses the VPS relay
+- audio comes only from the station host browser/headless seed or peer relays
+  over WebRTC DataChannels
+- the relay rejects `/native/`, `/source/` and `/media/`
+
+A direct station endpoint is not required for the p2p mode. If you choose
+`RADIO_MEDIA_MODE=direct`, then the station needs its own direct HTTPS endpoint
+and `RADIO_DIRECTORY_PUBLIC_URL` must be that endpoint.
 
 ## Audit of the old deployment
 
@@ -39,15 +46,15 @@ clients used that domain or its HTTP leaf fallback. P2P DataChannels may bypass
 it, but HTTP fallback/`/native` does not. It is not honest to call that
 deployment rendezvous-only.
 
-## Making it true
+## Implemented posture for this project
 
-1. Give the station a direct HTTPS endpoint.
-2. Register the direct endpoint in the Directory.
-3. Do not put the station's public domain behind the relay.
-4. Keep relay for control/join only; the standalone relay defaults
-   `RELAY_ALLOW_MEDIA=0` and rejects media paths.
-5. For P2P, keep `/ws` signaling through the station direct endpoint; use
-   STUN/TURN separately if needed. Do not use the VPS as an HTTP audio leaf.
-
-The direct endpoint is a deployment requirement. If no direct endpoint exists,
-the VPS is the only reachable path and media will necessarily traverse it.
+1. Relay defaults `RELAY_ALLOW_MEDIA=0`; media paths return 403.
+2. Station defaults `RADIO_MEDIA_MODE=p2p`; no HTTP/native fallback from a
+   remote browser.
+3. Only a loopback browser gets the seed role. A remote browser reached
+   through the relay cannot become a seed and cannot pull `/source` through
+   the VPS.
+4. The host seed reads `/source` over loopback and forwards frames to remote
+   listeners over WebRTC; remote children can relay to their children.
+5. If the seed is offline, remote listeners wait/retry. This is the deliberate
+   tradeoff for keeping the VPS out of media.

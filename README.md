@@ -52,11 +52,11 @@ with the local library, but NetEase/QQ/Bilibili sources are unavailable.
 
 ## VPS role
 
-**Rendezvous only is the intended deployment.** The directory and optional
-control relay may run on the VPS. Audio must be served by the station's direct
-endpoint, not proxied through the VPS.
+**Rendezvous only is the intended deployment.** The directory and control
+relay may run on the VPS. In the default `p2p` mode, audio comes from the
+station host seed or peer relays over WebRTC; the VPS rejects media paths.
 
-Read [docs/VPS_ROLE.md](docs/VPS_ROLE.md) before deploying. The relay defaults
+Read [docs/VPS_ROLE.md](docs/VPS_ROLE.md) and [docs/HOST_SEED.md](docs/HOST_SEED.md) before deploying. The relay defaults
 to rejecting `/native/`, `/source/` and `/media/`; set `RELAY_ALLOW_MEDIA=1`
 only if you explicitly want the relay to carry media (the opposite of the
 rendezvous-only policy).

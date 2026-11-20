@@ -36,6 +36,7 @@ type api struct {
 	source     *stream.Hub
 	mesh       *mesh.Hub
 	meshSTUN   string
+	mediaMode  string
 	httpLeafMax int
 	httpLeaves  map[string]time.Time
 	leafMu      sync.Mutex
@@ -419,6 +420,7 @@ func (a *api) backgroundItems() []map[string]any {
 func (a *api) config(w http.ResponseWriter, r *http.Request) {
 	settings := a.state.Settings()
 	settings["backgrounds"] = a.backgroundItems()
+	settings["media_mode"] = a.mediaMode
 	writeJSON(w, 200, settings)
 }
 
@@ -1788,14 +1790,18 @@ func main() {
 	}
 	directoryClient.Heartbeat = heartbeat
 	directoryClient.Start()
+	mediaMode := env("RADIO_MEDIA_MODE", "p2p")
+	meshHub := mesh.NewHub()
+	meshHub.SetLocalSeedOnly(mediaMode == "p2p")
 	a := &api{
 		index:      index,
 		libraryDir: clean,
 		adminToken: os.Getenv("RADIO_GO_ADMIN_TOKEN"),
 		state:      state,
 		source:     stream.NewHub(),
-		mesh:       mesh.NewHub(),
+		mesh:       meshHub,
 		meshSTUN:   os.Getenv("RADIO_MESH_STUN"),
+		mediaMode:  mediaMode,
 		staticDir:  env("RADIO_STATIC_DIR", "web/static"),
 		uploadsDir: env("RADIO_GO_UPLOADS", "data/uploads"),
 		directory: directoryClient,

@@ -165,6 +165,7 @@ func (c *conn) readMessage() ([]byte, error) {
 type Node struct {
 	ID            string
 	Conn          *conn
+	Local         bool
 	PreferredRole string
 	CanRelay      bool
 	Role          string
@@ -176,24 +177,52 @@ type Node struct {
 	Blocked       map[string]time.Time
 }
 
-func newNode(id string, socket *conn) *Node {
+func newNode(id string, socket *conn, local bool) *Node {
 	return &Node{
-		ID: id, Conn: socket, PreferredRole: "child", CanRelay: true,
+		ID: id, Conn: socket, Local: local, PreferredRole: "child", CanRelay: true,
 		Role: "child", Parents: map[string]bool{}, Children: map[string]bool{},
 		JoinedAt: time.Now(), Blocked: map[string]time.Time{},
 	}
 }
 
 type Hub struct {
-	mu         sync.Mutex
-	nodes      map[string]*Node
-	seeds      map[string]bool
-	nextNumber int
-	closed     bool
+	mu            sync.Mutex
+	nodes         map[string]*Node
+	seeds         map[string]bool
+	nextNumber    int
+	closed        bool
+	localSeedOnly bool
 }
 
 func NewHub() *Hub {
 	return &Hub{nodes: map[string]*Node{}, seeds: map[string]bool{}}
+}
+
+// SetLocalSeedOnly prevents a browser reached through a relay from becoming
+// an audio seed. Only a browser connected directly from the station host may
+// fetch /source and relay it to remote listeners.
+func (h *Hub) SetLocalSeedOnly(value bool) {
+	h.mu.Lock()
+	h.localSeedOnly = value
+	h.mu.Unlock()
+}
+
+func (h *Hub) isLocalSeedOnly() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.localSeedOnly
+}
+
+func localRequest(r *http.Request) bool {
+	if r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Real-IP") != "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (h *Hub) send(node *Node, value any) bool {
@@ -230,7 +259,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	accept := sha1.Sum([]byte(key + guid))
 	_, _ = fmt.Fprintf(buffered, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", base64.StdEncoding.EncodeToString(accept[:]))
 	_ = buffered.Flush()
-	node := newNode("", newConn(socket, buffered.Reader))
+	node := newNode("", newConn(socket, buffered.Reader), localRequest(r))
 	h.serve(node)
 }
 
@@ -276,6 +305,14 @@ func (h *Hub) serve(node *Node) {
 }
 
 func (h *Hub) targetSeedCount() int {
+	if h.localSeedOnly {
+		for _, node := range h.nodes {
+			if node.Local && node.Hello && node.CanRelay {
+				return 1
+			}
+		}
+		return 0
+	}
 	if len(h.nodes) >= 2 {
 		return maxSeeds
 	}
@@ -288,7 +325,7 @@ func (h *Hub) targetSeedCount() int {
 func (h *Hub) chooseSeed() *Node {
 	var candidates []*Node
 	for _, node := range h.nodes {
-		if node.Role == "child" && node.Hello && node.CanRelay {
+		if node.Role == "child" && node.Hello && node.CanRelay && (!h.localSeedOnly || node.Local) {
 			candidates = append(candidates, node)
 		}
 	}
@@ -307,7 +344,7 @@ func (h *Hub) chooseSeed() *Node {
 }
 
 func (h *Hub) promote(node *Node) {
-	if node.Role == "seed" || !node.CanRelay {
+	if node.Role == "seed" || !node.CanRelay || (h.localSeedOnly && !node.Local) {
 		return
 	}
 	for parentID := range node.Parents {
@@ -526,7 +563,7 @@ func (h *Hub) hello(node *Node, message map[string]any) {
 		canRelay = false
 	}
 	preferred := "child"
-	if rawPreferred == "seed" && canRelay {
+	if rawPreferred == "seed" && canRelay && (!h.localSeedOnly || node.Local) {
 		preferred = "seed"
 	}
 	node.PreferredRole = preferred
@@ -538,8 +575,10 @@ func (h *Hub) hello(node *Node, message map[string]any) {
 	role := "child"
 	if !canRelay {
 		role = "child"
-	} else if len(h.seeds) == 0 || len(h.seeds) < target {
-		role = "seed"
+	} else if !h.localSeedOnly || node.Local {
+		if len(h.seeds) == 0 || len(h.seeds) < target {
+			role = "seed"
+		}
 	}
 	node.Role = role
 	if role == "seed" {

@@ -57,6 +57,12 @@
       /* ignore */
     }
   }
+  const loopbackHost = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(location.hostname);
+  if (loopbackHost && !roleParam) {
+    // The station initiator's own browser is the only legal HTTP media seed.
+    // Remote browsers reached through a relay must never fetch /source.
+    preferredRole = "seed";
+  }
   if (preferredRole === "leaf" || params.get("relay") === "0") {
     canRelay = false;
     preferredRole = "leaf";
