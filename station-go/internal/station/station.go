@@ -144,6 +144,11 @@ func (s *State) Rebuild() {
 		}
 	}
 	s.requests = kept
+	// Keep a shuffled library order so the next track is known in advance
+	// (metadata preload) while the rotation itself is still random.
+	rand.Shuffle(len(queue), func(a, b int) {
+		queue[a], queue[b] = queue[b], queue[a]
+	})
 	s.queue = queue
 	if s.current.ID == "" {
 		s.advanceLocked()
@@ -172,12 +177,9 @@ func (s *State) advanceLocked() {
 		return
 	}
 	nextIndex := 0
-	// Requested songs still play in pin/request order. Once there are no
-	// pending requests, the local library rotation is random instead of
-	// following the alphabetical index order.
-	if len(s.orderedRequestsLocked()) == 0 {
-		nextIndex = rand.Intn(len(s.queue))
-	}
+	// The library queue is shuffled when rebuilt. Pending requests are moved to
+	// the front by reorderQueueLocked; otherwise the first auto track is the
+	// same one exposed as next_auto for preloading.
 	s.current = s.queue[nextIndex]
 	s.queue = append(s.queue[:nextIndex], s.queue[nextIndex+1:]...)
 	if s.current.CoverURL == "" {
@@ -490,6 +492,20 @@ func (s *State) SnapshotLocked() map[string]any {
 		}
 		break
 	}
+	nextAuto := map[string]any(nil)
+	for _, track := range s.queue {
+		requested := false
+		for _, request := range s.requests {
+			if request.TrackID == track.ID && request.Status == "pending" {
+				requested = true
+				break
+			}
+		}
+		if !requested {
+			nextAuto = entry(track)
+			break
+		}
+	}
 	direct := ""
 	lyricsURL := ""
 	if s.current.ID != "" {
@@ -500,7 +516,7 @@ func (s *State) SnapshotLocked() map[string]any {
 		"seq": s.seq, "audio_rev": s.audioRev, "server_time_ms": now.UnixMilli(),
 		"started_at_ms": startedMS, "position_ms": position,
 		"duration_ms": s.current.DurationMS, "paused": s.paused,
-		"track": entry(s.current), "next": next, "listeners": s.listeners,
+		"track": entry(s.current), "next": next, "next_auto": nextAuto, "listeners": s.listeners,
 		"audio": map[string]any{"direct": direct},
 		"lyrics_url": lyricsURL,
 		"vote": map[string]any{"votes": len(s.votes), "needed": s.voteNeededLocked(), "voted": false},

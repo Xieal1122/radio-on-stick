@@ -207,6 +207,13 @@ func (h *Hub) SetLocalSeedOnly(value bool) {
 	h.mu.Unlock()
 }
 
+func (h *Hub) Maintain() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.maintainSeeds()
+	h.topUpAll("maintain")
+}
+
 func (h *Hub) isLocalSeedOnly() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()

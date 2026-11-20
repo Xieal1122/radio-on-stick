@@ -171,6 +171,7 @@ const state = {
   preloadRetryAt: 0,
   preloadAttempts: 0,
   preloadCover: null,
+  preloadMetaKey: "",
   frameId: null,
   lastMediaPositionAt: 0,
   lastDriftSeekAt: 0,
@@ -1630,8 +1631,24 @@ function wireAudioElement(element) {
   });
 }
 
+function preloadNextMeta(next) {
+  if (!next || !next.id) return;
+  const key = String(next.id);
+  if (state.preloadMetaKey === key) return;
+  state.preloadMetaKey = key;
+  if (next.cover_url) {
+    const image = new Image();
+    image.decoding = "async";
+    image.src = coverSource(next.cover_url);
+  }
+  if (next.lyrics_url) {
+    fetch(next.lyrics_url, { cache: "force-cache" }).catch(() => {});
+  }
+}
+
 function preloadNext(now = state.now) {
   if (state.mediaMode === "p2p") {
+    preloadNextMeta(now && now.next_auto);
     stopPreload();
     return;
   }

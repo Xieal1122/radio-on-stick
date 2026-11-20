@@ -1878,6 +1878,14 @@ func main() {
 	mux.HandleFunc("/api/library/stream/", a.stream)
 	mux.HandleFunc("/api/admin/library", a.adminLibrary)
 	mux.HandleFunc("/api/admin/library/scan", a.adminLibraryScan)
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			meshHub.Maintain()
+		}
+	}()
+
 	addr := env("RADIO_GO_ADDR", "127.0.0.1:8091")
 	go func() {
 		ticker := time.NewTicker(time.Hour)
