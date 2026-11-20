@@ -1979,7 +1979,7 @@ func main() {
 	}()
 
 	go func() {
-		ticker := time.NewTicker(2 * time.Second)
+		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 		for range ticker.C {
 			if rtcSource == nil {
