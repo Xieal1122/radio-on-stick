@@ -28,6 +28,9 @@
   const CATCHUP_MS = 10000;
   const CATCHUP_COOLDOWN_MS = 6000;
   const SOURCE_BUFFER_MS = 5200;
+  const PARENT_STATS_INTERVAL_MS = 2000;
+  const PARENT_SILENCE_MS = 6000;
+  const PARENT_GRACE_MS = 9000;
   const MAX_QUEUE_FRAMES = 120;
   const BUFFER_HIGH = 1024 * 1024;
   const BUFFER_LOW = 256 * 1024;
@@ -106,6 +109,7 @@
   let lastResyncAt = 0;
   let stallTimes = [];
   let sourceToken = 0;
+  let parentStatsTimer = null;
   let localAudioTrack = null;
   let localAudioStream = null;
   let audioContext = null;
@@ -489,6 +493,8 @@
       link.chunks += 1;
       link.bytes += raw.byteLength;
       link.lastSeq = frame.seq;
+      link.lastProgressAt = Date.now();
+      link.lastBytes = link.bytes;
     }
 
     if (accepted.streamId !== frame.streamId) {
@@ -696,6 +702,11 @@
       lastSeq: null,
       closed: false,
       reportTimer: null,
+      createdAt: Date.now(),
+      lastProgressAt: Date.now(),
+      lastPackets: 0,
+      lastBytes: 0,
+      silentReported: false,
       audioTrack: null,
       audioStream: null,
     };
@@ -708,6 +719,7 @@
           ? new MediaStream([event.track])
           : null;
       link.open = true;
+      link.lastProgressAt = Date.now();
       selectAudioParent();
     };
     pc.onconnectionstatechange = () => {
@@ -778,6 +790,11 @@
       lastSeq: null,
       closed: false,
       reportTimer: null,
+      createdAt: Date.now(),
+      lastProgressAt: Date.now(),
+      lastPackets: 0,
+      lastBytes: 0,
+      silentReported: false,
     };
     upstreams.set(parentId, link);
     if (TRACK_MODE) {
@@ -788,6 +805,7 @@
           : event.track
             ? new MediaStream([event.track])
             : null;
+        link.lastProgressAt = Date.now();
         selectAudioParent();
       };
     }
@@ -908,6 +926,48 @@
         removeDownstream(childId, false);
       });
     return link;
+  }
+
+  function startParentStatsMonitor() {
+    if (parentStatsTimer) return;
+    parentStatsTimer = setInterval(checkParentStats, PARENT_STATS_INTERVAL_MS);
+  }
+
+  async function checkParentStats() {
+    if (!active || !wanted || userPaused) return;
+    const now = Date.now();
+    for (const link of Array.from(upstreams.values())) {
+      if (link.closed || !link.pc) continue;
+      let packets = 0;
+      let bytes = 0;
+      try {
+        const stats = await link.pc.getStats();
+        stats.forEach((report) => {
+          if (report.type === "inbound-rtp" && report.kind === "audio") {
+            packets += Number(report.packetsReceived) || 0;
+            bytes += Number(report.bytesReceived) || 0;
+          }
+        });
+      } catch (_) {
+        continue;
+      }
+      if (packets > link.lastPackets || bytes > link.lastBytes) {
+        link.lastPackets = Math.max(link.lastPackets, packets);
+        link.lastBytes = Math.max(link.lastBytes, bytes);
+        link.lastProgressAt = now;
+        link.silentReported = false;
+        continue;
+      }
+      if (
+        !link.silentReported &&
+        now - link.createdAt > PARENT_GRACE_MS &&
+        now - link.lastProgressAt > PARENT_SILENCE_MS
+      ) {
+        link.silentReported = true;
+        debug("parent packet silence", link.id);
+        reportUpstreamLost(link.id);
+      }
+    }
   }
 
   function reportUpstreamLost(parentId) {
@@ -1720,6 +1780,7 @@
 
   setInterval(syncTick, 1200);
   setInterval(updateMode, 2500);
+  startParentStatsMonitor();
 
   window.RadioMesh = {
     start,
