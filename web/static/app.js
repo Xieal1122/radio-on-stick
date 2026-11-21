@@ -3346,8 +3346,12 @@ function updateMuteUI() {
   const muted = Boolean(audio.muted);
   muteBtn.classList.toggle("muted", muted);
   muteBtn.setAttribute("aria-pressed", String(muted));
-  muteBtn.setAttribute("aria-label", muted ? "取消静音" : "静音");
-  muteBtn.title = muted ? "取消静音" : "静音";
+  // On touch layouts the same control only opens the slider, so it must not be
+  // announced as a mute switch.
+  const portrait = portraitMedia.matches;
+  const label = portrait ? "音量调节" : muted ? "取消静音" : "静音";
+  muteBtn.setAttribute("aria-label", label);
+  muteBtn.title = label;
   if (volumeOnIcon) volumeOnIcon.classList.toggle("hidden", muted);
   if (volumeOffIcon) volumeOffIcon.classList.toggle("hidden", !muted);
 }
@@ -3361,25 +3365,12 @@ function setVolumePanel(open) {
 
 muteBtn.addEventListener("click", () => {
   if (portraitMedia.matches) {
-    // Three-state cycle while the slider is collapsed:
-    // hidden+sound -> open+sound -> hidden+muted -> hidden+sound ...
-    // If the user is already muted, the first tap restores sound instead of
-    // opening the slider.
-    if (audio.muted) {
-      audio.muted = false;
-      audio.volume = clamp(Number(volumeEl.value), 0, 1);
-      setVolumePanel(false);
-      updateMuteUI();
-      return;
-    }
-    if (!volumePanelOpen) {
-      setVolumePanel(true);
-      updateMuteUI();
-      return;
-    }
-    audio.muted = true;
-    setVolumePanel(false);
-    updateMuteUI();
+    // Touch layouts: the button only opens/closes the slider. It used to cycle
+    // open -> mute, so a tap meant to expand the slider could land on the mute
+    // branch and cut the sound instead (double taps and touch→click retargeting
+    // made it intermittent). Dragging the slider still unmutes, so no state is
+    // unreachable.
+    setVolumePanel(!volumePanelOpen);
     return;
   }
   audio.muted = !audio.muted;
@@ -3400,7 +3391,10 @@ document.addEventListener("pointerdown", (event) => {
 });
 
 if (portraitMedia.addEventListener) {
-  portraitMedia.addEventListener("change", () => setVolumePanel(false));
+  portraitMedia.addEventListener("change", () => {
+    setVolumePanel(false);
+    updateMuteUI();
+  });
 }
 updateMuteUI();
 

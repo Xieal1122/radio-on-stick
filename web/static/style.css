@@ -5499,6 +5499,19 @@ html[data-theme="light"] .admin-console-backdrop {
     background: rgba(13, 20, 33, 0.96);
     box-shadow: 0 12px 34px rgba(0, 0, 0, 0.32);
   }
+
+  /* The default thumb (13px + 2px borders = 17) is odd, so inside the 34px
+     capsule it lands on a half pixel and the track reads as sitting ~0.5px to
+     the left of the circle. An even size puts both centres on the same grid. */
+  .dock-volume.volume-open input[type="range"]::-webkit-slider-thumb {
+    width: 14px;
+    height: 14px;
+  }
+
+  .dock-volume.volume-open input[type="range"]::-moz-range-thumb {
+    width: 10px;
+    height: 10px;
+  }
 }
 
 /* Muted control changes appearance, not just its aria-label. */
