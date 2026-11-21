@@ -429,6 +429,24 @@ func (a *api) config(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, settings)
 }
 
+// isOneShotUpload reports whether the id belongs to a one-shot upload, either
+// still indexed or already consumed and only remembered in the history.
+func (a *api) isOneShotUpload(trackID string) bool {
+	if trackID == "" || strings.Contains(trackID, ":") {
+		return false
+	}
+	if track, ok := a.index.Get(trackID); ok && strings.EqualFold(track.Source, "upload") {
+		return true
+	}
+	if track, ok := a.state.TrackByID(trackID); ok && strings.EqualFold(track.Source, "upload") {
+		return true
+	}
+	if history, ok := a.state.HistoryByTrackID(trackID); ok && strings.EqualFold(history.Source, "upload") {
+		return true
+	}
+	return false
+}
+
 func (a *api) requestTrack(trackID string) (library.Track, bool) {
 	history, hasHistory := a.state.HistoryByTrackID(trackID)
 	fillHistory := func(track *library.Track) {
@@ -495,6 +513,12 @@ func (a *api) requestTrack(trackID string) (library.Track, bool) {
 	}
 	history, found := a.state.HistoryByTrackID(trackID)
 	if !found {
+		return library.Track{}, false
+	}
+	// Local files and uploads only exist while they are indexed. A history row
+	// for a deleted file must not resurrect into a permanently broken queue
+	// entry (the upload is gone after it played once).
+	if history.Source == "" || strings.EqualFold(history.Source, "local") || strings.EqualFold(history.Source, "upload") {
 		return library.Track{}, false
 	}
 	return a.trackFromHistory(history)
@@ -601,9 +625,16 @@ func (a *api) request(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "missing_track_id"})
 		return
 	}
+	if a.isOneShotUpload(trackID) {
+		writeJSON(w, 410, map[string]any{
+			"error":   "upload_one_shot",
+			"message": "上传的曲目只播放一次，已不能再次点歌",
+		})
+		return
+	}
 	track, ok := a.requestTrack(trackID)
 	if !ok {
-		writeJSON(w, 404, map[string]any{"error": "not_found"})
+		writeJSON(w, 404, map[string]any{"error": "not_found", "message": "这首已经不在曲库里了"})
 		return
 	}
 	if a.banned(body.Nickname) {
@@ -1883,7 +1914,7 @@ func (a *api) searchAll(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0, len(tracks)+limit)
 	for _, track := range tracks {
 		items = append(items, map[string]any{
-			"id": track.ID, "source": "local", "source_id": track.ID,
+			"id": track.ID, "source": track.Source, "source_id": track.ID,
 			"title": track.Title, "artist": track.Artist, "album": track.Album,
 			"duration_ms": track.DurationMS, "cover_url": track.CoverURL, "candidate_id": track.ID,
 		})

@@ -2387,6 +2387,23 @@ body.drawer-open {
   background: rgba(255, 125, 138, 0.1);
 }
 
+/* A one-shot upload cannot be requested again; the control stays visible so the
+   row keeps its shape, but it reads as unavailable. */
+.row-action:disabled,
+.row-action:disabled.add {
+  color: var(--faint);
+  border-color: var(--line);
+  background: transparent;
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.row-action:disabled:hover {
+  color: var(--faint);
+  border-color: var(--line);
+  background: transparent;
+}
+
 .row-action.active {
   color: var(--accent);
   border-color: rgba(255, 184, 107, 0.3);

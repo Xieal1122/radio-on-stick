@@ -308,10 +308,17 @@ func scanFile(path string) *Track {
 		title = fileTitle(path)
 	}
 	id := trackID(path)
+	// Only /api/upload writes a sidecar, so its presence marks a one-shot
+	// upload. The distinction survives rescans and restarts, which matters
+	// because an upload must not be requestable again once it played.
+	source := "local"
+	if hasMeta {
+		source = "upload"
+	}
 	return &Track{
 		ID: id, Title: title, Artist: artist, Album: album,
 		DurationMS: duration, Format: strings.TrimPrefix(ext, "."),
-		Path: path, Source: "local", SourceID: id,
+		Path: path, Source: source, SourceID: id,
 		CoverURL: "/api/local-cover/" + id,
 	}
 }

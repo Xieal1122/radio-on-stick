@@ -56,6 +56,11 @@ func TestSidecarOverridesFilenameMetadata(t *testing.T) {
 	if track.DurationMS != 223866 {
 		t.Fatalf("duration = %d", track.DurationMS)
 	}
+	// A sidecar means /api/upload wrote the file: it is a one-shot upload and
+	// must stay distinguishable from the permanent library.
+	if track.Source != "upload" {
+		t.Fatalf("source = %q, want upload", track.Source)
+	}
 }
 
 func TestAddFileKeepsScannedTracks(t *testing.T) {

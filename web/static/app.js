@@ -2620,7 +2620,16 @@ function renderHistory(items) {
     duration.textContent = fmtTime(item.duration_ms, item.duration_estimated);
     side.appendChild(duration);
     const add = rowAction("再次点歌", ["M12 5v14M5 12h14"], "add");
-    add.addEventListener("click", () => requestTrack(item.track_id || item.id, item));
+    if (String(item.source || "").toLowerCase() === "upload") {
+      // One-shot upload: the file is gone after playback, so re-requesting it
+      // can only produce a dead queue entry.
+      add.disabled = true;
+      add.setAttribute("aria-disabled", "true");
+      add.title = "上传曲目只播放一次，无法再次点歌";
+      add.setAttribute("aria-label", add.title);
+    } else {
+      add.addEventListener("click", () => requestTrack(item.track_id || item.id, item));
+    }
     side.appendChild(add);
     row.appendChild(side);
     historyList.appendChild(row);
@@ -2827,6 +2836,12 @@ function requestCandidate(item, button) {
 
 function requestTrack(trackId, item, button) {
   if (!trackId) return;
+  if (item && String(item.source || "").toLowerCase() === "upload") {
+    // Uploads are deleted after they play once, so queueing them again would
+    // only create a request that can never be played.
+    showToast("上传曲目只播放一次，不能再次点歌");
+    return;
+  }
   submitRequest(
     { track_id: trackId, nickname: state.nickname, ts: state.requestTs },
     item,
