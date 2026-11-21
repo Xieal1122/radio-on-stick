@@ -1996,6 +1996,9 @@ function setLyricsEmpty(text) {
   currentLyricText.textContent = text;
   currentLyricTrans.textContent = "";
   currentLyricTrans.classList.add("hidden");
+  // Centre the placeholder even when the panel was already visible (landscape
+  // keeps it open, so setLyricsOpen() is not called on a track change).
+  normalizeLyricsLayout();
 }
 
 function parseLrc(text) {
@@ -2069,6 +2072,7 @@ function renderLyrics(lrc, translation) {
   lyricsEl.textContent = "";
   lyricsEl.appendChild(fragment);
   normalizeLyricsLayout();
+  requestAnimationFrame(normalizeLyricsLayout);
   lyricsEl.classList.toggle("hide-translation", !state.showTranslation);
   currentLyricText.textContent = "";
   currentLyricTrans.textContent = "";
@@ -2090,14 +2094,34 @@ async function loadLyrics(url, trackId) {
   }
 }
 
+function lyricsLineHeight() {
+  const first = state.lyricEls && state.lyricEls[0];
+  return first && first.clientHeight > 0 ? first.clientHeight : 44;
+}
+
 function normalizeLyricsLayout() {
-  // Keep a small, content-bounded scroll range even if an older cached
-  // stylesheet still carries the former 45%/32% vertical padding.
   if (!lyricsEl || !lyricsScroll) return;
-  lyricsEl.style.setProperty("padding-top", "0", "important");
-  lyricsEl.style.setProperty("padding-bottom", "0", "important");
-  lyricsScroll.style.setProperty("padding-top", "20px", "important");
-  lyricsScroll.style.setProperty("padding-bottom", "20px", "important");
+  // Symmetric padding lets the first and the last line reach the vertical
+  // centre; without it the list hugged the top and bottom edges and only the
+  // fade mask hinted where the "window" was.
+  const height = lyricsScroll.clientHeight;
+  const pad = height > 0 ? Math.max(0, Math.round((height - lyricsLineHeight()) / 2)) : 0;
+  lyricsEl.classList.toggle("is-empty", !state.lyricEls.length);
+  if (!state.lyricEls.length) {
+    lyricsEl.style.setProperty("padding-top", "0", "important");
+    lyricsEl.style.setProperty("padding-bottom", "0", "important");
+  } else {
+    lyricsEl.style.setProperty("padding-top", `${pad}px`, "important");
+    lyricsEl.style.setProperty("padding-bottom", `${pad}px`, "important");
+  }
+  lyricsScroll.style.setProperty("padding-top", "0", "important");
+  lyricsScroll.style.setProperty("padding-bottom", "0", "important");
+}
+
+function lyricsScrollTarget(row) {
+  if (!row || !lyricsScroll) return 0;
+  // Centre the active line instead of parking it at 42% of the viewport.
+  return Math.max(0, row.offsetTop - (lyricsScroll.clientHeight - row.clientHeight) / 2);
 }
 
 function updateLyrics(positionMs) {
@@ -2114,8 +2138,7 @@ function updateLyrics(positionMs) {
   if (active) {
     active.classList.add("active");
     if (Date.now() - state.lyricsManualAt >= 4500) {
-      const top = active.offsetTop - lyricsScroll.clientHeight * 0.42 + active.clientHeight / 2;
-      scrollLyricsTo(top, "smooth");
+      scrollLyricsTo(lyricsScrollTarget(active), "smooth");
     }
   }
   syncCurrentLyric(index, true);
@@ -2153,8 +2176,7 @@ function refreshCurrentLyric(instant = false) {
   syncCurrentLyric(state.lastLyricIndex, true);
   const active = state.lyricEls[state.lastLyricIndex];
   if (active) {
-    const top = active.offsetTop - lyricsScroll.clientHeight * 0.42 + active.clientHeight / 2;
-    scrollLyricsTo(top, instant ? "auto" : "smooth");
+    scrollLyricsTo(lyricsScrollTarget(active), instant ? "auto" : "smooth");
   }
 }
 
@@ -3315,6 +3337,7 @@ stage.addEventListener("touchmove", onTouchMove, { passive: false });
 stage.addEventListener("touchend", onTouchEnd, { passive: true });
 window.addEventListener("resize", () => {
   normalizeLyricsLayout();
+  refreshCurrentLyric(true);
   if (window.matchMedia("(orientation: landscape)").matches && state.lyricsOpen) {
     setLyricsOpen(false);
   }
