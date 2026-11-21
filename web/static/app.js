@@ -2056,17 +2056,22 @@ function renderLyrics(lrc, translation) {
   for (const line of lines) {
     const row = document.createElement("div");
     row.className = "lyric-line";
+    // Shrink-wrapped wrapper so the active-line scale can grow around the text
+    // itself instead of the full-width block (which would overflow the column).
+    const inner = document.createElement("span");
+    inner.className = "lyric-inner";
     const text = document.createElement("span");
     text.className = "lyric-text";
     text.textContent = line.text;
-    row.appendChild(text);
+    inner.appendChild(text);
     const trans = nearestTranslation(translations, line.time);
     if (trans) {
       const sub = document.createElement("span");
       sub.className = "lyric-translation";
       sub.textContent = trans;
-      row.appendChild(sub);
+      inner.appendChild(sub);
     }
+    row.appendChild(inner);
     fragment.appendChild(row);
     state.lyricEls.push(row);
   }
@@ -2122,6 +2127,33 @@ function lyricsScrollTarget(row) {
   return Math.max(0, row.offsetTop - (lyricsScroll.clientHeight - row.clientHeight) / 2);
 }
 
+/* How much the active line may grow without spilling out of its column.
+   Scaling is capped per line: a line that already fills the width stays at 1. */
+function lyricGrowFor(row) {
+  const inner = row.querySelector(".lyric-inner");
+  if (!inner) return 1;
+  const style = getComputedStyle(row);
+  const padLeft = parseFloat(style.paddingLeft) || 0;
+  const padRight = parseFloat(style.paddingRight) || 0;
+  const available = row.clientWidth - padLeft - padRight;
+  if (available <= 0) return 1;
+  // The widest rendered line decides the cap: a wrapped line whose longest row
+  // is narrower than the column can still grow a little without spilling.
+  let natural = 0;
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(inner);
+    for (const rect of range.getClientRects()) {
+      if (rect.width > natural) natural = rect.width;
+    }
+  } catch (_) {
+    natural = inner.offsetWidth;
+  }
+  if (!natural || natural >= available - 1) return 1;
+  const max = parseFloat(style.getPropertyValue("--lyric-grow-max")) || 1.16;
+  return Math.min(max, available / natural);
+}
+
 function updateLyrics(positionMs) {
   if (!state.lyricEls.length) return;
   let index = -1;
@@ -2134,6 +2166,7 @@ function updateLyrics(positionMs) {
   state.lastLyricIndex = index;
   const active = state.lyricEls[index];
   if (active) {
+    active.style.setProperty("--lyric-grow", lyricGrowFor(active).toFixed(3));
     active.classList.add("active");
     if (Date.now() >= state.lyricsSuspendUntil && Date.now() - state.lyricsManualAt >= 4500) {
       scrollLyricsTo(lyricsScrollTarget(active), "smooth");
@@ -2174,6 +2207,9 @@ function refreshCurrentLyric(instant = false) {
   syncCurrentLyric(state.lastLyricIndex, true);
   const active = state.lyricEls[state.lastLyricIndex];
   if (active) {
+    // The panel size (and with it the font size and available width) changes
+    // when it opens or the window resizes; the allowed growth must follow.
+    active.style.setProperty("--lyric-grow", lyricGrowFor(active).toFixed(3));
     scrollLyricsTo(lyricsScrollTarget(active), instant ? "auto" : "smooth");
   }
 }

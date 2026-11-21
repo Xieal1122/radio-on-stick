@@ -6044,3 +6044,61 @@ html[data-theme="light"] .admin-profile-bar {
   font-size: 10.5px;
   font-weight: 700;
 }
+
+/* ---------- Active lyric emphasis without reflow ----------
+   Growing the active line with font-size re-wrapped its text mid-animation
+   (one line became two), so the whole list jumped. Use a scale transform for
+   the same visual growth: layout never changes, and the browser can animate it
+   on the compositor. The amount is capped per line in JS so scaled text never
+   runs past the column edge. */
+.lyrics-panel {
+  --lyric-fs: clamp(20px, 5.6vw, 29px);
+  --lyric-grow-max: 1.16;
+}
+
+@media (orientation: landscape) {
+  .lyrics-panel {
+    --lyric-fs: clamp(20px, 2.3vw, 30px);
+    --lyric-grow-max: 1.18;
+  }
+}
+
+.playback-page:not(.lyrics-open) .lyrics-panel {
+  --lyric-fs: clamp(15px, 4.2vw, 20px);
+}
+
+.lyrics-panel .lyric-line,
+.lyrics-panel .lyric-line.active {
+  font-size: var(--lyric-fs);
+  font-weight: inherit;
+}
+
+/* The scale lives on a shrink-wrapped wrapper so it grows around the text
+   instead of the full-width block. */
+.lyric-inner {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  transform-origin: left center;
+  transition: transform 0.65s cubic-bezier(0.22, 0.8, 0.24, 1);
+}
+
+/* Same emphasis as before (colour + weight + slight offset), but the weight is
+   faked with a stroke so glyph metrics do not change and text cannot re-wrap. */
+.lyrics-panel .lyric-line.active {
+  -webkit-text-stroke: 0.03em currentColor;
+  /* The offset now lives on the inner wrapper together with the scale. */
+  transform: none;
+}
+
+.lyrics-panel .lyric-line.active .lyric-inner {
+  transform: translateX(3px) scale(var(--lyric-grow, 1));
+}
+
+.lyrics-panel .lyric-line.active .lyric-text {
+  font-weight: inherit;
+}
+
+.lyrics-panel .lyric-line.active .lyric-translation {
+  -webkit-text-stroke: 0;
+}
