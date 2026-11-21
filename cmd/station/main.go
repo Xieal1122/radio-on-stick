@@ -380,14 +380,16 @@ func (a *api) listenersAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) now(w http.ResponseWriter, r *http.Request) {
-	a.touchListener(w, r, "")
+	// The poll carries the nickname so presence is known without the listener
+	// having to open the "listening now" list first.
+	a.touchListener(w, r, strings.TrimSpace(r.URL.Query().Get("nickname")))
 	snapshot := a.state.Snapshot()
 	snapshot["mesh"] = map[string]any{"enabled": true, "ws_url": "/ws", "stun": a.meshSTUN}
 	writeJSON(w, 200, snapshot)
 }
 
 func (a *api) stateJSON(w http.ResponseWriter, r *http.Request) {
-	state := a.state.State(a.touchListener(w, r, ""))
+	state := a.state.State(a.touchListener(w, r, strings.TrimSpace(r.URL.Query().Get("nickname"))))
 	if now, ok := state["now"].(map[string]any); ok {
 		now["mesh"] = map[string]any{"enabled": true, "ws_url": "/ws", "stun": a.meshSTUN}
 	}

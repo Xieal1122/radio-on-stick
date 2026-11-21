@@ -2692,7 +2692,10 @@ async function loadSidebar() {
   if (state.sidebarLoading) return;
   state.sidebarLoading = true;
   try {
-    const data = await fetchJSON("/api/state", { timeout: 8_000 });
+    const nicknameQuery = state.nickname
+      ? `?nickname=${encodeURIComponent(state.nickname)}`
+      : "";
+    const data = await fetchJSON(`/api/state${nicknameQuery}`, { timeout: 8_000 });
     const active = new Set();
     const current = data.now && data.now.track;
     if (current && current.id) active.add(String(current.id));
