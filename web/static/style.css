@@ -2884,7 +2884,7 @@ body {
 .track-meta {
   width: min(74vw, 43vh, 460px);
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 14px;
   margin-top: 16px;
@@ -4543,11 +4543,13 @@ html[data-theme="light"] .backdrop {
 }
 
 .lyrics-panel .lyric-line {
+  /* No font-size transition: animating the type size reflowed every row, so
+     opening the panel made the scroll target drift for 650ms and the live
+     line ended up above the window. Mode changes should switch in one step. */
   transition:
     color 0.65s cubic-bezier(0.22, 0.8, 0.24, 1),
     opacity 0.65s cubic-bezier(0.22, 0.8, 0.24, 1),
     transform 0.65s cubic-bezier(0.22, 0.8, 0.24, 1),
-    font-size 0.65s cubic-bezier(0.22, 0.8, 0.24, 1),
     background 0.65s ease;
 }
 
@@ -4972,7 +4974,9 @@ html[data-theme="light"] .backdrop {
 .track-meta {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 42%);
-  align-items: end;
+  /* Title and artist/album share one optical centre line instead of sitting
+     on a common baseline, which read as bottom-aligned. */
+  align-items: center;
   column-gap: 14px;
 }
 
@@ -5831,4 +5835,146 @@ html[data-theme="light"] .admin-profile-bar {
 .admin-profile-field > span {
   white-space: nowrap;
   flex: 0 0 auto;
+}
+
+/* ---------- Portrait playback: lyrics own the space between the track
+   metadata and the upcoming-track row ----------
+   The cover column is flattened so the lyric panel can be ordered between two
+   of its children without touching the DOM shared with the landscape grid. */
+@media (orientation: portrait) {
+  /* Text column (title / lyrics / next row) keeps the original metadata width;
+     the cover art keeps its own size and is excluded from that alignment. */
+  .playback-page:not(.lyrics-open) {
+    --portrait-col: min(78vw, 42vh, 460px);
+    --portrait-cover: min(74vw, 34vh, 420px);
+  }
+
+  .playback-page:not(.lyrics-open) .cover-column {
+    display: contents;
+  }
+
+  .playback-page:not(.lyrics-open) .playback-layout {
+    flex: 1 1 auto;
+    justify-content: flex-start;
+  }
+
+  .playback-page:not(.lyrics-open) .cover-button {
+    order: 1;
+    width: var(--portrait-cover);
+  }
+
+  .playback-page:not(.lyrics-open) .track-meta {
+    order: 2;
+    align-items: center;
+    width: var(--portrait-col);
+    margin-top: 14px;
+  }
+
+  /* The full lyric window replaces the single live line in portrait. */
+  .playback-page:not(.lyrics-open) .current-lyric {
+    display: none;
+  }
+
+  .playback-page:not(.lyrics-open) .lyrics-panel {
+    order: 3;
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: var(--portrait-col);
+    padding: 0;
+    margin-top: 8px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .playback-page:not(.lyrics-open) .lyrics-panel .lyrics-scroll {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+    padding: 0;
+  }
+
+  /* Text starts on the cover edge: no extra inset, so both blocks share the
+     same optical left margin. */
+  .playback-page:not(.lyrics-open) .lyrics-panel .lyric-line {
+    font-size: clamp(15px, 4.2vw, 20px);
+    padding: 5px 0;
+  }
+
+  /* The translation switch belongs to the full-lyrics mode; inline it would
+     float over the last lyric line. */
+  .playback-page:not(.lyrics-open) .lyrics-panel .toggle-btn {
+    display: none;
+  }
+
+  /* Keep the upcoming row out of the dock's upward shadow band and let it use
+     the full dynamic width of the lyric column. */
+  .playback-page:not(.lyrics-open) .next-track-info {
+    order: 4;
+    width: var(--portrait-col);
+    max-width: none;
+    margin-top: 10px;
+    margin-bottom: 14px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+
+/* Short portrait screens cannot host a lyric window at all: drop it and keep
+   the single live line with the next-track row pinned above the dock. */
+@media (orientation: portrait) and (max-height: 640px) {
+  .playback-page:not(.lyrics-open) .lyrics-panel {
+    display: none;
+  }
+
+  .playback-page:not(.lyrics-open) .current-lyric {
+    display: block;
+    order: 3;
+    width: var(--portrait-col);
+    margin-top: 10px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .playback-page:not(.lyrics-open) .next-track-info {
+    margin-top: auto;
+    margin-bottom: 12px;
+  }
+}
+
+/* Short portrait screens: shrink the cover column so the lyric window keeps at
+   least three readable lines above the upcoming-track row. */
+@media (orientation: portrait) and (max-height: 720px) {
+  .playback-page:not(.lyrics-open) {
+    --portrait-cover: min(70vw, 31vh, 380px);
+  }
+
+  .playback-page:not(.lyrics-open) .track-meta {
+    margin-top: 10px;
+  }
+
+  .playback-page:not(.lyrics-open) .lyrics-panel {
+    margin-top: 6px;
+  }
+
+  .playback-page:not(.lyrics-open) .next-track-info {
+    margin-top: 8px;
+    margin-bottom: 10px;
+  }
+}
+
+/* Keep the fallback row anchored above the dock on every short portrait size;
+   declared last so the taller-screen spacing above cannot win. */
+@media (orientation: portrait) and (max-height: 720px) {
+  .playback-page:not(.lyrics-open) .next-track-info {
+    margin-top: auto;
+  }
+}
+
+/* Without an inline lyric window the cover can use more of the width again. */
+@media (orientation: portrait) and (max-height: 640px) {
+  .playback-page:not(.lyrics-open) {
+    --portrait-cover: min(76vw, 40vh, 400px);
+  }
 }

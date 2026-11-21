@@ -124,6 +124,7 @@ const state = {
   lastLyricIndex: -1,
   lyricsManualAt: 0,
   lyricsManualTimer: null,
+  lyricsSuspendUntil: 0,
   lyricProgrammaticUntil: 0,
   lastPositionSec: -1,
   lastReportKey: null,
@@ -2094,18 +2095,15 @@ async function loadLyrics(url, trackId) {
   }
 }
 
-function lyricsLineHeight() {
-  const first = state.lyricEls && state.lyricEls[0];
-  return first && first.clientHeight > 0 ? first.clientHeight : 44;
-}
-
 function normalizeLyricsLayout() {
   if (!lyricsEl || !lyricsScroll) return;
   // Symmetric padding lets the first and the last line reach the vertical
   // centre; without it the list hugged the top and bottom edges and only the
-  // fade mask hinted where the "window" was.
+  // fade mask hinted where the "window" was. Half the container height is
+  // independent of the row height, so re-running this after a resize or a
+  // panel toggle cannot shift the scroll offset by a few pixels.
   const height = lyricsScroll.clientHeight;
-  const pad = height > 0 ? Math.max(0, Math.round((height - lyricsLineHeight()) / 2)) : 0;
+  const pad = height > 0 ? Math.round(height / 2) : 0;
   lyricsEl.classList.toggle("is-empty", !state.lyricEls.length);
   if (!state.lyricEls.length) {
     lyricsEl.style.setProperty("padding-top", "0", "important");
@@ -2137,7 +2135,7 @@ function updateLyrics(positionMs) {
   const active = state.lyricEls[index];
   if (active) {
     active.classList.add("active");
-    if (Date.now() - state.lyricsManualAt >= 4500) {
+    if (Date.now() >= state.lyricsSuspendUntil && Date.now() - state.lyricsManualAt >= 4500) {
       scrollLyricsTo(lyricsScrollTarget(active), "smooth");
     }
   }
@@ -2186,8 +2184,14 @@ function scrollLyricsTo(top, behavior) {
 }
 
 function markLyricsManualScroll() {
+  // Layout changes (opening/closing the panel, resizing) move the scroll
+  // position on their own; that is not the listener scrolling.
+  if (Date.now() < state.lyricsSuspendUntil) return;
   const landscapeLyrics = window.matchMedia("(orientation: landscape)").matches;
-  if (!state.lyricsOpen && !landscapeLyrics) return;
+  // Portrait now shows the lyric window inline, so a manual scroll there must
+  // pause the auto-centring too.
+  const inlineLyrics = Boolean(lyricsScroll && lyricsScroll.clientHeight > 0);
+  if (!state.lyricsOpen && !landscapeLyrics && !inlineLyrics) return;
   state.lyricsManualAt = Date.now();
   clearTimeout(state.lyricsManualTimer);
   state.lyricsManualTimer = setTimeout(() => {
@@ -2384,17 +2388,26 @@ function setLyricsOpen(open) {
     "aria-label",
     state.lyricsOpen ? "收起完整歌词" : "展开歌词",
   );
-  if (state.lyricsOpen) {
+  clearTimeout(state.lyricsManualTimer);
+  state.lyricsManualAt = 0;
+  // The panel changes size the moment the class flips, and the browser fires a
+  // scroll event for the shifted content. Freeze auto/manual scroll handling
+  // until the new geometry is in place, then jump straight to the live line
+  // instead of gliding from the stale offset.
+  state.lyricsSuspendUntil = Date.now() + 700;
+  const settleLyrics = () => {
     normalizeLyricsLayout();
-    state.lyricsManualAt = 0;
-    clearTimeout(state.lyricsManualTimer);
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => refreshCurrentLyric(true));
-    });
-  } else {
-    clearTimeout(state.lyricsManualTimer);
-    state.lyricsManualAt = 0;
-  }
+    refreshCurrentLyric(true);
+  };
+  requestAnimationFrame(() => {
+    settleLyrics();
+    requestAnimationFrame(settleLyrics);
+  });
+  setTimeout(() => {
+    if (state.lyricsOpen !== Boolean(open)) return;
+    settleLyrics();
+    state.lyricsSuspendUntil = 0;
+  }, 420);
 }
 
 function onPageWheel(event) {
@@ -3297,6 +3310,22 @@ lyricsScroll.addEventListener("scroll", () => {
   if (Date.now() < state.lyricProgrammaticUntil) return;
   markLyricsManualScroll();
 }, { passive: true });
+
+// The lyric window changes size when the panel opens or the viewport rotates.
+// Re-centre in the same frame the height changes so the live line never drifts
+// to a stale offset (the "it scrolled by itself" jump).
+if (typeof ResizeObserver === "function") {
+  let lastLyricsHeight = 0;
+  const lyricsResizeObserver = new ResizeObserver(() => {
+    const height = lyricsScroll.clientHeight;
+    if (height <= 0 || height === lastLyricsHeight) return;
+    lastLyricsHeight = height;
+    normalizeLyricsLayout();
+    refreshCurrentLyric(true);
+    state.lyricProgrammaticUntil = Date.now() + 200;
+  });
+  lyricsResizeObserver.observe(lyricsScroll);
+}
 
 translationToggle.addEventListener("click", () => {
   state.showTranslation = !state.showTranslation;
