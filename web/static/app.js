@@ -1790,6 +1790,10 @@ function applyNow(now) {
   state.serverPaused = Boolean(now.paused);
   updateListenerUI(now);
   if (mesh) mesh.update(now);
+  // A live WebRTC audio track keeps playing across a track change (the station
+  // swaps the RTP feed in place). Re-running the HTTP/preload paths here only
+  // tore the element down.
+  const meshStreaming = Boolean(mesh && mesh.isActive() && audio && audio.srcObject);
 
   if (!now.track) {
     if (mesh) mesh.stop();
@@ -1859,6 +1863,10 @@ function applyNow(now) {
       crossfadeToUrl(sources[0], startPosition)
     ) {
       // A not-yet-ready direct source still overlaps the old audio.
+    } else if (state.userWantsPlay && meshStreaming) {
+      // P2P track: keep the attached stream, just make sure it is running.
+      updateAudioMode();
+      if (audio.paused) attemptPlay();
     } else if (state.userWantsPlay && sources.length) {
       loadSource(startPosition);
     } else {
@@ -1877,6 +1885,10 @@ function applyNow(now) {
       adoptPreloaded(sources[0], currentPosition(now))
     ) {
       // Source refresh can also use the preloaded buffer.
+    } else if (state.userWantsPlay && meshStreaming) {
+      // Same P2P track, new audio revision: keep the element as it is.
+      updateAudioMode();
+      if (audio.paused) attemptPlay();
     } else if (state.userWantsPlay && sources.length) {
       loadSource(currentPosition(now));
     } else {
@@ -1889,6 +1901,8 @@ function applyNow(now) {
   if (state.serverPaused) {
     audio.pause();
     clearStalledTimer();
+  } else if (state.userWantsPlay && meshStreaming) {
+    if (audio.paused) attemptPlay();
   } else if (state.userWantsPlay && !audio.src) {
     ensureSourceLoaded(now);
   } else if (state.userWantsPlay && audio.paused) {
@@ -1896,7 +1910,7 @@ function applyNow(now) {
     attemptPlay();
   }
 
-  if (state.userWantsPlay && !audio.src && !audio.srcObject && state.sources.length) {
+  if (state.userWantsPlay && !audio.src && !audio.srcObject && !meshStreaming && state.sources.length) {
     loadSource(currentPosition(now));
   }
   syncPlaybackPosition(now);
@@ -2917,7 +2931,8 @@ async function uploadLocalAudio(file) {
     });
     setView("queue");
     setSearchStatus("");
-    showToast("上传成功");
+    const uploadedTitle = data && data.track ? String(data.track.title || "") : "";
+    showToast(uploadedTitle ? `已加入点歌队列：${uploadedTitle}` : "已加入点歌队列");
     loadSidebar();
     pollSoon();
   } catch (error) {

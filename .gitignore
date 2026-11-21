@@ -45,3 +45,8 @@ plugins/commercial/app/sources/__pycache__/
 # Optional private commercial runtime and helper
 plugins/commercial/*
 !plugins/commercial/README.md
+
+# Local build output
+bin/
+/.workbuddy
+scripts/dev-local.sh
