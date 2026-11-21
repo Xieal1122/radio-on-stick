@@ -6018,3 +6018,29 @@ html[data-theme="light"] .admin-profile-bar {
     margin-bottom: 10px;
   }
 }
+
+/* Bilingual-lyrics toggle: a real hiragana あ plus a small Latin A. Drawn as
+   text inside the SVG so the kana is the actual glyph instead of a path that
+   only approximated it. */
+.kana-icon {
+  fill: currentColor;
+  stroke: none;
+}
+
+.kana-icon text {
+  fill: currentColor;
+  stroke: none;
+}
+
+.kana-icon .kana-glyph {
+  font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic",
+    "Noto Sans JP", "Meiryo", system-ui, sans-serif;
+  font-size: 14.5px;
+  font-weight: 500;
+}
+
+.kana-icon .latin-glyph {
+  font-family: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
+  font-size: 10.5px;
+  font-weight: 700;
+}
