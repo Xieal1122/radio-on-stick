@@ -6063,8 +6063,13 @@ html[data-theme="light"] .admin-profile-bar {
   }
 }
 
-.playback-page:not(.lyrics-open) .lyrics-panel {
-  --lyric-fs: clamp(15px, 4.2vw, 20px);
+/* Inline portrait uses the smaller type of the mobile layout. This must stay
+   inside the portrait query: unscoped it also matched the landscape inline view
+   and shrank the desktop lyrics from 29px to the 20px cap. */
+@media (orientation: portrait) {
+  .playback-page:not(.lyrics-open) .lyrics-panel {
+    --lyric-fs: clamp(15px, 4.2vw, 20px);
+  }
 }
 
 .lyrics-panel .lyric-line,

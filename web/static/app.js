@@ -2100,8 +2100,48 @@ async function loadLyrics(url, trackId) {
   }
 }
 
+/* In landscape the lyric column spans the full stage height, so centring the
+   live line inside it landed ~50px below the artwork's midline. Align the whole
+   window (fade bounds included) with the cover centre instead: the window keeps
+   a symmetric height around that line and the toggle button stays on its bottom
+   edge. Portrait keeps its own inline layout, untouched. */
+function alignLyricsWindow() {
+  if (!lyricsPanel) return;
+  const landscape = window.matchMedia("(orientation: landscape)").matches;
+  if (!landscape) {
+    lyricsPanel.style.removeProperty("height");
+    lyricsPanel.style.removeProperty("flex");
+    lyricsPanel.style.removeProperty("margin-top");
+    return;
+  }
+  const track = lyricsPanel.parentElement;
+  const cover = document.querySelector(".cover-button");
+  if (!track || !cover || cover.offsetParent === null) return;
+  const bounds = track.getBoundingClientRect();
+  const art = cover.getBoundingClientRect();
+  const center = art.top + art.height / 2;
+  const above = center - bounds.top;
+  const below = bounds.bottom - center;
+  const half = Math.min(above, below);
+  if (!(half > 60)) {
+    // Too little room for a meaningful window (very short viewport): fall back
+    // to the plain column instead of keeping a stale inline height.
+    lyricsPanel.style.removeProperty("height");
+    lyricsPanel.style.removeProperty("flex");
+    lyricsPanel.style.removeProperty("margin-top");
+    return;
+  }
+  // The scroll box sits `inset` px below the panel top, so it has to be that
+  // much shorter for its own centre to land on the artwork's midline.
+  const inset = lyricsScroll ? Math.max(0, lyricsScroll.offsetTop) : 0;
+  lyricsPanel.style.height = `${Math.max(160, Math.round(half * 2 - inset))}px`;
+  lyricsPanel.style.flex = "0 0 auto";
+  lyricsPanel.style.marginTop = `${Math.round(above - half)}px`;
+}
+
 function normalizeLyricsLayout() {
   if (!lyricsEl || !lyricsScroll) return;
+  alignLyricsWindow();
   // Symmetric padding lets the first and the last line reach the vertical
   // centre; without it the list hugged the top and bottom edges and only the
   // fade mask hinted where the "window" was. Half the container height is
@@ -2119,6 +2159,13 @@ function normalizeLyricsLayout() {
   }
   lyricsScroll.style.setProperty("padding-top", "0", "important");
   lyricsScroll.style.setProperty("padding-bottom", "0", "important");
+  // The window may have just been re-sized (open/close, rotation, first paint).
+  // Re-anchor instantly so the live line stays on the artwork's midline instead
+  // of keeping an offset computed for the previous height.
+  const active = state.lyricEls[state.lastLyricIndex];
+  if (active && lyricsScroll.clientHeight > 0) {
+    scrollLyricsTo(lyricsScrollTarget(active), "auto");
+  }
 }
 
 function lyricsScrollTarget(row) {
