@@ -115,7 +115,6 @@ const state = {
   sourceIndex: 0,
   clockOffset: 0,
   userWantsPlay: false,
-  localPausedPositionMs: null,
   pendingSeekMs: 0,
   lastLoadedSeq: null,
   lyricsTrackId: null,
@@ -565,9 +564,21 @@ function loadTheme() {
   }
 }
 
+/* Same gate mesh.js uses internally: MediaSource with a codec we can mux, plus
+   WebRTC and a websocket. `isSupported` is the only capability the mesh exposes
+   publicly. */
+function meshUsable() {
+  if (!mesh || typeof mesh.isSupported !== "function") return false;
+  return Boolean(mesh.isSupported() && window.RTCPeerConnection && window.WebSocket);
+}
+
 function applyConfig(config) {
   state.uiConfig = config;
   state.mediaMode = config && config.media_mode === "p2p" ? "p2p" : "direct";
+  // A browser without WebRTC/MSE (iOS Safari on a plain-http LAN address, for
+  // one) can never join the mesh. Keeping p2p mode would just leave it silent,
+  // so such clients are served the direct stream instead.
+  if (state.mediaMode === "p2p" && !meshUsable()) state.mediaMode = "direct";
   stationName.textContent = config.station_name || "猫娘电台";
   stationSubtitle.textContent = config.subtitle || "";
   // The top bar stays compact; the subtitle lives in the browser tab as
@@ -1203,6 +1214,12 @@ function loadSource(positionMs) {
     return true;
   }
   if (state.mediaMode === "p2p") {
+    if (!meshUsable()) {
+      // The mesh cannot work in this browser; fall back instead of going quiet.
+      state.mediaMode = "direct";
+      loadDirectSource(positionMs);
+      return false;
+    }
     state.audioState = "error";
     refreshStatus();
     return false;
@@ -1220,8 +1237,15 @@ if (mesh) {
       refreshStatus();
     });
   }
-  mesh.setFallbackCallback(() => {
+  mesh.setFallbackCallback((reason) => {
     if (!state.now || !state.now.track) return;
+    if (state.mediaMode === "p2p" && (
+      reason === "unsupported" || reason === "webrtc_unsupported" || !meshUsable()
+    )) {
+      // Capability failure (no MediaSource / no RTCPeerConnection): retrying the
+      // mesh forever is what left phones with a silent player.
+      state.mediaMode = "direct";
+    }
     if (state.mediaMode === "p2p") {
       // Never fall back to /native through the VPS. Retry the P2P mesh; a
       // local host seed or a peer relay is the only legal media source.
@@ -1272,7 +1296,6 @@ function seekToLive() {
     // A live HTTP source may not expose a seekable duration. Re-open it at
     // the authoritative position instead of resuming from stale media time.
     if (state.sources.length) {
-      state.localPausedPositionMs = null;
       loadDirectSource(live);
       attemptPlay();
     }
@@ -1843,7 +1866,6 @@ function applyNow(now) {
     state.lyricsTrackId = now.track.id;
     state.lastReportKey = null;
     state.lastPositionSec = -1;
-    state.localPausedPositionMs = null;
     state.preloadAttempts = 0;
     state.preloadRetryAt = 0;
     if (mesh) mesh.setPaused(false);
@@ -3203,14 +3225,8 @@ function updateMediaSessionPosition(now = state.now) {
   const timestamp = Date.now();
   if (timestamp - state.lastMediaPositionAt < 5_000) return;
   const duration = Number(now.duration_ms) || 0;
-  const locallyPaused = state.serverPaused || !state.userWantsPlay || audio.paused;
-  const useLocal = Boolean(audio.src) && audio.readyState > 0;
-  const position =
-    locallyPaused && state.localPausedPositionMs !== null
-      ? state.localPausedPositionMs
-      : locallyPaused && useLocal
-      ? audio.currentTime * 1000
-      : currentPosition(now);
+  // Same rule as the on-screen progress: the server clock is authoritative.
+  const position = currentPosition(now);
   if (duration <= 0 || !Number.isFinite(position)) return;
   state.lastMediaPositionAt = timestamp;
   try {
@@ -3236,7 +3252,6 @@ function setupMediaSession() {
   register("play", () => {
     if (!state.now || !state.now.track || state.serverPaused) return;
     state.userWantsPlay = true;
-    state.localPausedPositionMs = null;
     if (mesh) mesh.setPaused(false);
     if (!ensureSourceLoaded()) {
       seekToLive();
@@ -3245,7 +3260,6 @@ function setupMediaSession() {
     updatePlayButton();
   });
   register("pause", () => {
-    state.localPausedPositionMs = currentPosition(state.now);
     state.userWantsPlay = false;
     if (mesh) mesh.setPaused(true);
     audio.pause();
@@ -3273,20 +3287,11 @@ function frame() {
   if (document.hidden) return;
   const now = state.now;
   if (now && now.track) {
-    const useLocal = Boolean(audio.src) && audio.readyState > 0;
-    const locallyPaused = state.serverPaused || !state.userWantsPlay || audio.paused;
-    // While playing, the server timeline is authoritative so two clients
-    // cannot show different progress. A locally paused reader keeps the
-    // position captured at the moment pause was pressed, not raw media time
-    // (which is relative to a P2P/MSE stream that may have started late).
-    const pausedPosition =
-      state.serverPaused
-        ? currentPosition(now)
-        : state.localPausedPositionMs;
-    const position =
-      locallyPaused && pausedPosition !== null
-        ? Math.max(0, pausedPosition)
-        : currentPosition(now);
+    // The station keeps playing while this client is paused, so the timeline
+    // must keep following the server too. Freezing it at the moment pause was
+    // pressed made the progress bar (and the lyrics) sit still and then jump
+    // forward on resume, which read as the position being out of sync.
+    const position = currentPosition(now);
     const duration = Number(now.duration_ms) || 0;
     const percent = duration > 0 ? clamp((position / duration) * 100, 0, 100) : 0;
     progressFill.style.width = `${percent.toFixed(2)}%`;
@@ -3307,7 +3312,6 @@ function frame() {
 playBtn.addEventListener("click", () => {
   if (!state.now || !state.now.track || state.serverPaused) return;
   if (!audio.paused) {
-    state.localPausedPositionMs = currentPosition(state.now);
     state.userWantsPlay = false;
     // Keep the mesh source pump alive while paused. The server timeline
     // continues, and retaining the incoming MSE buffer lets resume seek to
@@ -3324,7 +3328,6 @@ playBtn.addEventListener("click", () => {
     return;
   }
   state.userWantsPlay = true;
-  state.localPausedPositionMs = null;
   if (mesh) {
     mesh.setPaused(false);
     mesh.setWanted(true);

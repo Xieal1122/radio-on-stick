@@ -727,6 +727,11 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .lyrics-scroll {
+  /* The panel sets the scroll offset itself. Chrome's scroll anchoring would
+     also adjust it when the content above the viewport changes (the panel is
+     padded by half its height, and that padding changes with the layout), which
+     produced a late 30-40px jump after closing the full-lyrics view. */
+  overflow-anchor: none;
   position: relative;
   flex: 1;
   min-height: 0;
@@ -3525,9 +3530,12 @@ html[data-theme="light"] .drawer {
   animation: lyrics-meta-in 0.38s cubic-bezier(0.22, 0.8, 0.24, 1);
 }
 
+/* Fade only. The 10px slide moved the whole list after it had already been
+   centred on the live line, which read as the lyrics drifting up (and back
+   down on close). */
 @keyframes lyrics-panel-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes lyrics-meta-in {
@@ -4595,10 +4603,11 @@ html[data-theme="light"] .backdrop {
   max-height: 76px;
   opacity: 1;
   overflow: hidden;
-  transition:
-    max-height 0.5s cubic-bezier(0.22, 0.8, 0.24, 1),
-    opacity 0.42s ease,
-    margin-top 0.5s cubic-bezier(0.22, 0.8, 0.24, 1);
+  /* Height and margin must not animate: this row sits in the same column as
+     the lyric window, so a 500ms slide resized the window frame by frame and
+     the lyrics crept upward (the "drifting" that only showed up when an
+     upcoming track existed). Only the fade animates now. */
+  transition: opacity 0.42s ease;
 }
 
 .next-track-info.empty {

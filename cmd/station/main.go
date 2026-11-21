@@ -32,41 +32,41 @@ import (
 )
 
 type api struct {
-	index      *library.Index
-	libraryDir []string
-	adminToken string
-	scanMu     sync.Mutex
-	state      *station.State
-	source     *stream.Hub
-	mesh       *mesh.Hub
-	rtc        *rtcseed.Source
-	meshSTUN   string
-	mediaMode  string
-	httpLeafMax int
-	httpLeaves  map[string]time.Time
-	leafMu      sync.Mutex
-	staticDir  string
-	uploadsDir string
-	directory  *directory.Client
-	joinRequired bool
-	joinSecret   string
-	plugins      *plugins.Client
+	index          *library.Index
+	libraryDir     []string
+	adminToken     string
+	scanMu         sync.Mutex
+	state          *station.State
+	source         *stream.Hub
+	mesh           *mesh.Hub
+	rtc            *rtcseed.Source
+	meshSTUN       string
+	mediaMode      string
+	httpLeafMax    int
+	httpLeaves     map[string]time.Time
+	leafMu         sync.Mutex
+	staticDir      string
+	uploadsDir     string
+	directory      *directory.Client
+	joinRequired   bool
+	joinSecret     string
+	plugins        *plugins.Client
 	backgroundsDir string
-	backgroundMu sync.Mutex
+	backgroundMu   sync.Mutex
 	backgroundURLs []string
 	backgroundFile string
-	libraryFile   string
-	pluginMu      sync.Mutex
-	pluginCache   map[string]plugins.Candidate
-	listenerMu    sync.Mutex
-	listeners     map[string]time.Time
-	listenerNames map[string]string
-	mp3Mu         sync.Mutex
-	mp3Cache      map[string]bool
-	ownerIPs      map[string]bool
-	limitMu       sync.Mutex
-	limits        map[string]map[string][]int64
-	bannedWords   []string
+	libraryFile    string
+	pluginMu       sync.Mutex
+	pluginCache    map[string]plugins.Candidate
+	listenerMu     sync.Mutex
+	listeners      map[string]time.Time
+	listenerNames  map[string]string
+	mp3Mu          sync.Mutex
+	mp3Cache       map[string]bool
+	ownerIPs       map[string]bool
+	limitMu        sync.Mutex
+	limits         map[string]map[string][]int64
+	bannedWords    []string
 }
 
 func (a *api) banned(texts ...string) bool {
@@ -130,9 +130,13 @@ func splitWords(raw string) []string {
 
 func envInt(key string, fallback int) int {
 	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" { return fallback }
+	if raw == "" {
+		return fallback
+	}
 	value, err := strconv.Atoi(raw)
-	if err != nil { return fallback }
+	if err != nil {
+		return fallback
+	}
 	return value
 }
 
@@ -268,7 +272,25 @@ func (a *api) stream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": "stat_failed"})
 		return
 	}
+	// Safari is strict about media MIME types and the system mime table reports
+	// FLAC as audio/x-flac, which iOS refuses to play. Serve the standard types.
+	if mime, ok := audioMIME[strings.ToLower(filepath.Ext(track.Path))]; ok {
+		w.Header().Set("Content-Type", mime)
+	}
 	http.ServeContent(w, r, filepath.Base(track.Path), info.ModTime(), file)
+}
+
+// audioMIME lists the container types the station can serve straight from disk.
+var audioMIME = map[string]string{
+	".mp3":  "audio/mpeg",
+	".m4a":  "audio/mp4",
+	".aac":  "audio/aac",
+	".flac": "audio/flac",
+	".wav":  "audio/wav",
+	".ogg":  "audio/ogg",
+	".oga":  "audio/ogg",
+	".opus": "audio/ogg",
+	".webm": "audio/webm",
 }
 
 func ownerSet(raw string) map[string]bool {
@@ -455,10 +477,18 @@ func (a *api) requestTrack(trackID string) (library.Track, bool) {
 		if !hasHistory {
 			return
 		}
-		if track.Title == "" { track.Title = history.Title }
-		if track.Artist == "" { track.Artist = history.Artist }
-		if track.CoverURL == "" { track.CoverURL = history.CoverURL }
-		if track.DurationMS == 0 { track.DurationMS = history.DurationMS }
+		if track.Title == "" {
+			track.Title = history.Title
+		}
+		if track.Artist == "" {
+			track.Artist = history.Artist
+		}
+		if track.CoverURL == "" {
+			track.CoverURL = history.CoverURL
+		}
+		if track.DurationMS == 0 {
+			track.DurationMS = history.DurationMS
+		}
 	}
 	if source, sourceID, found := strings.Cut(trackID, ":"); found {
 		a.pluginMu.Lock()
@@ -492,11 +522,21 @@ func (a *api) requestTrack(trackID string) (library.Track, bool) {
 			}
 		}
 		if cached {
-			if resolved.Title == "" { resolved.Title = item.Title }
-			if resolved.Artist == "" { resolved.Artist = item.Artist }
-			if resolved.Album == "" { resolved.Album = item.Album }
-			if resolved.DurationMS == 0 { resolved.DurationMS = item.DurationMS }
-			if resolved.CoverURL == "" { resolved.CoverURL = item.CoverURL }
+			if resolved.Title == "" {
+				resolved.Title = item.Title
+			}
+			if resolved.Artist == "" {
+				resolved.Artist = item.Artist
+			}
+			if resolved.Album == "" {
+				resolved.Album = item.Album
+			}
+			if resolved.DurationMS == 0 {
+				resolved.DurationMS = item.DurationMS
+			}
+			if resolved.CoverURL == "" {
+				resolved.CoverURL = item.CoverURL
+			}
 		}
 		track := library.Track{
 			ID: trackID, Title: resolved.Title, Artist: resolved.Artist,
@@ -536,8 +576,12 @@ func (a *api) trackFromHistory(history station.History) (library.Track, bool) {
 		resolved, err := a.plugins.Resolve(track.Source, track.SourceID)
 		if err == nil && resolved.AudioURL != "" {
 			track.URL = resolved.AudioURL
-			if track.DurationMS == 0 { track.DurationMS = resolved.DurationMS }
-			if track.CoverURL == "" { track.CoverURL = resolved.CoverURL }
+			if track.DurationMS == 0 {
+				track.DurationMS = resolved.DurationMS
+			}
+			if track.CoverURL == "" {
+				track.CoverURL = resolved.CoverURL
+			}
 		}
 	}
 	if track.Source == "" {
@@ -545,7 +589,9 @@ func (a *api) trackFromHistory(history station.History) (library.Track, bool) {
 		query := strings.TrimSpace(track.Title + " " + track.Artist)
 		if query != "" {
 			for _, item := range a.plugins.Search(query) {
-				if item.Source == "" || item.SourceID == "" { continue }
+				if item.Source == "" || item.SourceID == "" {
+					continue
+				}
 				track.Source = item.Source
 				track.SourceID = item.SourceID
 				track.DurationMS = item.DurationMS
@@ -567,31 +613,61 @@ func (a *api) trackFromHistory(history station.History) (library.Track, bool) {
 }
 
 func (a *api) ensureTrackAudio(track *library.Track) bool {
-	if track == nil || track.ID == "" { return false }
+	if track == nil || track.ID == "" {
+		return false
+	}
 	// Local library and uploads are files, not remote URLs; they are served by
 	// /native and /source directly from Path.
 	if track.Path != "" {
 		if latest, ok := a.index.Get(track.ID); ok {
-			if track.CoverURL == "" { track.CoverURL = latest.CoverURL }
-			if track.Title == "" { track.Title = latest.Title }
-			if track.Artist == "" { track.Artist = latest.Artist }
-			if track.Album == "" { track.Album = latest.Album }
-			if track.DurationMS == 0 { track.DurationMS = latest.DurationMS }
+			if track.CoverURL == "" {
+				track.CoverURL = latest.CoverURL
+			}
+			if track.Title == "" {
+				track.Title = latest.Title
+			}
+			if track.Artist == "" {
+				track.Artist = latest.Artist
+			}
+			if track.Album == "" {
+				track.Album = latest.Album
+			}
+			if track.DurationMS == 0 {
+				track.DurationMS = latest.DurationMS
+			}
 			a.state.UpdateTrackMetadata(*track)
 		}
 		return true
 	}
 	needsMetadata := track.Title == "" || track.Album == ""
-	if track.URL != "" && !needsMetadata { return true }
-	if track.Source == "" || track.SourceID == "" { return false }
+	if track.URL != "" && !needsMetadata {
+		return true
+	}
+	if track.Source == "" || track.SourceID == "" {
+		return false
+	}
 	resolved, err := a.plugins.Resolve(track.Source, track.SourceID)
-	if err != nil || resolved.AudioURL == "" { return false }
-	if track.URL == "" { track.URL = resolved.AudioURL }
-	if track.Title == "" { track.Title = resolved.Title }
-	if track.Artist == "" { track.Artist = resolved.Artist }
-	if track.Album == "" { track.Album = resolved.Album }
-	if track.DurationMS == 0 { track.DurationMS = resolved.DurationMS }
-	if track.CoverURL == "" { track.CoverURL = resolved.CoverURL }
+	if err != nil || resolved.AudioURL == "" {
+		return false
+	}
+	if track.URL == "" {
+		track.URL = resolved.AudioURL
+	}
+	if track.Title == "" {
+		track.Title = resolved.Title
+	}
+	if track.Artist == "" {
+		track.Artist = resolved.Artist
+	}
+	if track.Album == "" {
+		track.Album = resolved.Album
+	}
+	if track.DurationMS == 0 {
+		track.DurationMS = resolved.DurationMS
+	}
+	if track.CoverURL == "" {
+		track.CoverURL = resolved.CoverURL
+	}
 	a.state.SetTrackAudio(track.ID, track.URL)
 	a.state.UpdateTrackMetadata(*track)
 	return true
@@ -942,6 +1018,9 @@ func (a *api) native(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": "stat_failed"})
 		return
 	}
+	if mime, ok := audioMIME[strings.ToLower(filepath.Ext(track.Path))]; ok {
+		w.Header().Set("Content-Type", mime)
+	}
 	http.ServeContent(w, r, filepath.Base(track.Path), info.ModTime(), file)
 }
 
@@ -1025,7 +1104,7 @@ func (a *api) secure(next http.Handler) http.Handler {
 		"/admin.css": true, "/placeholder.svg": true, "/manifest.webmanifest": true,
 		"/sw.js": true, "/favicon.ico": true, "/healthz": true, "/api/config": true,
 		"/api/server-rtc/offer": true,
-		"/api/join": true, "/admin": true, "/admin/": true,
+		"/api/join":             true, "/admin": true, "/admin/": true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.ownerRequest(r) {
@@ -1090,7 +1169,9 @@ func (a *api) adminBackgroundDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 401, map[string]any{"error": "unauthorized"})
 		return
 	}
-	var body struct{ Name string `json:"name"` }
+	var body struct {
+		Name string `json:"name"`
+	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil || strings.ContainsAny(body.Name, "/\\") {
 		writeJSON(w, 400, map[string]any{"error": "bad_name"})
 		return
@@ -1104,7 +1185,9 @@ func (a *api) adminBackgroundURL(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 401, map[string]any{"error": "unauthorized"})
 		return
 	}
-	var body struct{ URL string `json:"url"` }
+	var body struct {
+		URL string `json:"url"`
+	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
 		writeJSON(w, 400, map[string]any{"error": "bad_json"})
 		return
@@ -1491,7 +1574,9 @@ func normalizeLocalLRC(text string) string {
 					lyric.WriteString(part.Tx)
 				}
 				ms := payload.T
-				if ms < 0 { ms = 0 }
+				if ms < 0 {
+					ms = 0
+				}
 				minutes := ms / 60000
 				seconds := (ms % 60000) / 1000
 				millis := ms % 1000
@@ -1724,7 +1809,12 @@ func (a *api) adminState(w http.ResponseWriter, r *http.Request) {
 		"policy": a.state.Policy(), "settings": a.state.Settings(),
 		"tracks": a.index.List(200), "backgrounds": a.backgroundItems(),
 		"library": map[string]any{"dirs": a.libraryDir, "tracks": a.index.Count()},
-		"directory": func() any { if a.directory == nil { return map[string]any{"enabled": false} }; return a.directory.Status(true) }(),
+		"directory": func() any {
+			if a.directory == nil {
+				return map[string]any{"enabled": false}
+			}
+			return a.directory.Status(true)
+		}(),
 	}
 	writeJSON(w, 200, result)
 }
@@ -1871,7 +1961,9 @@ func (a *api) adminDeleteMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 401, map[string]any{"error": "unauthorized"})
 		return
 	}
-	var body struct{ ID string `json:"id"` }
+	var body struct {
+		ID string `json:"id"`
+	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
 		writeJSON(w, 400, map[string]any{"error": "bad_json"})
 		return
@@ -1949,21 +2041,31 @@ func (a *api) searchAll(w http.ResponseWriter, r *http.Request) {
 	}
 	order := []string{"local", "bilibili", "netease", "qq"}
 	seenOrder := map[string]bool{}
-	for _, source := range order { seenOrder[source] = true }
+	for _, source := range order {
+		seenOrder[source] = true
+	}
 	for source := range groups {
-		if !seenOrder[source] { order = append(order, source) }
+		if !seenOrder[source] {
+			order = append(order, source)
+		}
 	}
 	mixed := make([]map[string]any, 0, limit)
 	for round := 0; len(mixed) < limit; round++ {
 		added := false
 		for _, source := range order {
 			group := groups[source]
-			if round >= len(group) { continue }
+			if round >= len(group) {
+				continue
+			}
 			mixed = append(mixed, group[round])
 			added = true
-			if len(mixed) >= limit { break }
+			if len(mixed) >= limit {
+				break
+			}
 		}
-		if !added { break }
+		if !added {
+			break
+		}
 	}
 	writeJSON(w, 200, map[string]any{"items": mixed, "candidates": mixed, "results": mixed})
 }
@@ -2057,31 +2159,31 @@ func main() {
 		os.Exit(0)
 	}()
 	a := &api{
-		index:      index,
-		libraryDir: clean,
-		adminToken: os.Getenv("RADIO_GO_ADMIN_TOKEN"),
-		state:      state,
-		source:     stream.NewHub(),
-		mesh:       meshHub,
-		rtc:        rtcSource,
-		meshSTUN:   os.Getenv("RADIO_MESH_STUN"),
-		mediaMode:  mediaMode,
-		staticDir:  env("RADIO_STATIC_DIR", "web/static"),
-		uploadsDir: env("RADIO_GO_UPLOADS", "data/uploads"),
-		directory: directoryClient,
-		joinRequired: os.Getenv("RADIO_JOIN_REQUIRED") == "1",
-		joinSecret: env("RADIO_JOIN_SECRET", env("RADIO_GO_ADMIN_TOKEN", "go-join-secret")),
-		plugins:    plugins.New(env("RADIO_PRIVATE_PYTHON", "python3"), env("RADIO_PRIVATE_HELPER", "plugins/commercial/helper.py")),
+		index:          index,
+		libraryDir:     clean,
+		adminToken:     os.Getenv("RADIO_GO_ADMIN_TOKEN"),
+		state:          state,
+		source:         stream.NewHub(),
+		mesh:           meshHub,
+		rtc:            rtcSource,
+		meshSTUN:       os.Getenv("RADIO_MESH_STUN"),
+		mediaMode:      mediaMode,
+		staticDir:      env("RADIO_STATIC_DIR", "web/static"),
+		uploadsDir:     env("RADIO_GO_UPLOADS", "data/uploads"),
+		directory:      directoryClient,
+		joinRequired:   os.Getenv("RADIO_JOIN_REQUIRED") == "1",
+		joinSecret:     env("RADIO_JOIN_SECRET", env("RADIO_GO_ADMIN_TOKEN", "go-join-secret")),
+		plugins:        plugins.New(env("RADIO_PRIVATE_PYTHON", "python3"), env("RADIO_PRIVATE_HELPER", "plugins/commercial/helper.py")),
 		backgroundsDir: env("RADIO_GO_BACKGROUNDS", "data/backgrounds"),
 		backgroundFile: env("RADIO_GO_BACKGROUND_URLS", "data/station-go-backgrounds.json"),
-		libraryFile:   libraryFile,
-		pluginCache: map[string]plugins.Candidate{},
-		listeners:   map[string]time.Time{},
-		listenerNames: map[string]string{},
-		mp3Cache:      map[string]bool{},
-		ownerIPs:      ownerSet(env("RADIO_OWNER_IPS", "127.0.0.1,::1")),
-		limits:        map[string]map[string][]int64{},
-		bannedWords:   splitWords(os.Getenv("RADIO_BANNED_WORDS")),
+		libraryFile:    libraryFile,
+		pluginCache:    map[string]plugins.Candidate{},
+		listeners:      map[string]time.Time{},
+		listenerNames:  map[string]string{},
+		mp3Cache:       map[string]bool{},
+		ownerIPs:       ownerSet(env("RADIO_OWNER_IPS", "127.0.0.1,::1")),
+		limits:         map[string]map[string][]int64{},
+		bannedWords:    splitWords(os.Getenv("RADIO_BANNED_WORDS")),
 	}
 	if raw, err := os.ReadFile(a.backgroundFile); err == nil {
 		_ = json.Unmarshal(raw, &a.backgroundURLs)
