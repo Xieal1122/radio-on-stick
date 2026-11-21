@@ -328,6 +328,16 @@ a:hover {
   white-space: pre-wrap;
 }
 
+/* Light theme: the dark-theme amber is invisible on a pale page, so use a
+   solid warm card with enough contrast for the announcement text. */
+html[data-theme="light"] .notice {
+  border-color: rgba(176, 108, 26, 0.28);
+  /* Same translucency as the dark theme; only the ink colour changes. */
+  background: rgba(255, 184, 107, 0.07);
+  color: #7a4a13;
+  box-shadow: 0 6px 18px rgba(23, 32, 51, 0.05);
+}
+
 .main-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
@@ -2866,7 +2876,10 @@ body {
   border-radius: 25px;
   overflow: hidden;
   background: transparent;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.34);
+  /* Negative spread keeps the blur from bleeding into the top edge of the
+     clipped stage, which used to show up as a hard shadow line under the
+     announcement bar. */
+  box-shadow: 0 22px 40px -8px rgba(0, 0, 0, 0.45);
   cursor: pointer;
 }
 
@@ -5976,5 +5989,15 @@ html[data-theme="light"] .admin-profile-bar {
 @media (orientation: portrait) and (max-height: 640px) {
   .playback-page:not(.lyrics-open) {
     --portrait-cover: min(76vw, 40vh, 400px);
+  }
+}
+
+/* Full-lyrics portrait mode parks the title right on the dock. Give the
+   bottom block a little breathing room instead of gluing it to the edge. */
+@media (orientation: portrait) {
+  /* Lift the title off the dock, but keep the upcoming-track row on its
+     original baseline: the gap goes between the two blocks, not below both. */
+  .playback-page.lyrics-open .track-meta {
+    margin-bottom: 10px;
   }
 }
