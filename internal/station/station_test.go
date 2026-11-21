@@ -9,6 +9,37 @@ import (
 	"github.com/Xieal1122/radio-go/internal/library"
 )
 
+func TestAdvanceHookRetiresSkippedAndFinishedTracks(t *testing.T) {
+	s := New(library.New(), "test")
+	s.current = library.Track{ID: "one", DurationMS: 1000}
+	s.queue = []library.Track{{ID: "two", DurationMS: 1000}}
+	var retired []string
+	s.SetAdvanceHook(func(track library.Track) { retired = append(retired, track.ID) })
+	s.Skip()
+	if len(retired) != 1 || retired[0] != "one" {
+		t.Fatalf("skip did not retire the previous track: %#v", retired)
+	}
+	s.current = library.Track{ID: "three", DurationMS: 10}
+	s.started = time.Now().Add(-time.Second)
+	s.queue = append(s.queue, library.Track{ID: "four", DurationMS: 1000})
+	s.Tick()
+	if len(retired) != 2 || retired[1] != "three" {
+		t.Fatalf("natural end did not retire the track: %#v", retired)
+	}
+}
+
+func TestAdvanceHookKeepsTrackThatIsImmediatelyReplayed(t *testing.T) {
+	s := New(library.New(), "test")
+	s.current = library.Track{ID: "only", DurationMS: 1000}
+	s.queue = []library.Track{{ID: "only", DurationMS: 1000}}
+	fired := 0
+	s.SetAdvanceHook(func(library.Track) { fired++ })
+	s.Skip()
+	if fired != 0 {
+		t.Fatalf("hook retired a track that is playing again: %d", fired)
+	}
+}
+
 func TestPauseFreezesAuthoritativePosition(t *testing.T) {
 	s := New(library.New(), "test")
 	s.current = library.Track{ID: "track", Title: "Track", DurationMS: 60000}
@@ -102,4 +133,30 @@ func mustJSON(s *State) []byte {
 		panic(err)
 	}
 	return raw
+}
+
+func TestRotationRefillsWhenQueueDrains(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.mp3", "b.mp3", "c.mp3"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	index := library.New()
+	if _, err := index.Scan([]string{dir}, 10); err != nil {
+		t.Fatal(err)
+	}
+	s := New(index, "test")
+	s.Rebuild()
+	seen := map[string]bool{}
+	for step := 0; step < 7; step++ {
+		s.Skip()
+		if s.current.ID == "" {
+			t.Fatalf("station went silent after %d skips", step+1)
+		}
+		seen[s.current.ID] = true
+	}
+	if len(seen) < 3 {
+		t.Fatalf("rotation never covered the library: %#v", seen)
+	}
 }

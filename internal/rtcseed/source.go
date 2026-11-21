@@ -76,7 +76,12 @@ func (s *Source) Ensure(track library.Track, positionMS int64) {
 		s.mu.Unlock()
 		return
 	}
-	s.stopLocked()
+	// Listeners hold a live audio track from the shared TrackLocalStaticRTP.
+	// Tearing the peer connections down here made every listener go silent on
+	// a track change until they renegotiated (or reloaded the page), so only
+	// the ffmpeg feeder is restarted: the peers keep receiving packets with
+	// continuous sequence numbers and timestamps.
+	s.stopFeederLocked()
 	s.key = track.ID
 	s.mu.Unlock()
 	if err := s.start(track, input, positionMS); err != nil {
@@ -219,8 +224,9 @@ func (s *Source) Stop() {
 	s.mu.Unlock()
 }
 
-func (s *Source) stopLocked() {
-	s.key = ""
+// stopFeederLocked stops the ffmpeg producer and its RTP socket but keeps peer
+// connections alive; used when switching tracks.
+func (s *Source) stopFeederLocked() {
 	if s.cmd != nil && s.cmd.Process != nil {
 		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
 	}
@@ -233,6 +239,11 @@ func (s *Source) stopLocked() {
 		s.conn = nil
 	}
 	s.cmd = nil
+}
+
+func (s *Source) stopLocked() {
+	s.key = ""
+	s.stopFeederLocked()
 	for pc := range s.peers {
 		_ = pc.Close()
 		delete(s.peers, pc)

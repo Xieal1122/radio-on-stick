@@ -664,6 +664,19 @@
     }
     activeAudioParent = selected.id;
     activeAudioStream = selected.audioStream;
+    const attached = selected.audioStream.getAudioTracks()[0] || null;
+    if (attached && !attached.__radioEndedWired) {
+      // A dead track is indistinguishable from silence in the UI: when the
+      // peer disappears (station restart, network drop) the element keeps a
+      // track that can never produce samples. Report it so the mesh reparents
+      // instead of waiting for the listener to reload the page.
+      attached.__radioEndedWired = true;
+      attached.addEventListener("ended", () => {
+        if (!active) return;
+        debug("audio track ended");
+        failMesh("track-ended");
+      });
+    }
     try {
       audioEl.pause();
       audioEl.removeAttribute("src");
@@ -1491,7 +1504,11 @@
     wanted = false;
     fallbackReason = reason;
     lastError = reason;
-    disabledKey = `${trackSeq}:${audioRev}`;
+    // A dropped audio track is transient: keep the next start() call allowed so
+    // the retry timer can rebuild the mesh for the same track revision.
+    if (reason !== "track-ended") {
+      disabledKey = `${trackSeq}:${audioRev}`;
+    }
     stopSource();
     resetMedia();
     currentStream = null;
@@ -1616,6 +1633,22 @@
       finite(nextNow.seq, 0) !== trackSeq ||
       finite(nextNow.audio_rev, 0) !== audioRev
     ) {
+      if (TRACK_MODE && activeAudioStream && !nextNow.paused) {
+        // The station swaps the RTP feed in place on a track change, so the
+        // attached audio track keeps producing samples. Resetting media here
+        // paused the element and nothing ever resumed it, which is what made
+        // the next song silent until the listener reloaded the page.
+        trackSeq = finite(nextNow.seq, 0);
+        audioRev = finite(nextNow.audio_rev, 0);
+        accepted = freshAccepted();
+        if (wanted && audioEl.paused) {
+          audioEl.play().catch(() => {
+            /* applyNow() retries on the next poll */
+          });
+        }
+        updateMode(true);
+        return;
+      }
       // The page will call start() again for the new track/audio revision.
       active = false;
       stopSource();
@@ -1794,6 +1827,15 @@
   setInterval(syncTick, 1200);
   setInterval(updateMode, 2500);
   startParentStatsMonitor();
+  // The hub drops sockets that stay silent for 30s. In RTP track mode the
+  // control socket carries no periodic traffic at all, so without this the
+  // whole mesh was torn down and rebuilt every 30s (an audible gap, and a
+  // permanent one whenever the retry was refused).
+  setInterval(() => {
+    if (ws && wsReady && ws.readyState === WebSocket.OPEN) {
+      send({ type: "ping" });
+    }
+  }, 10_000);
 
   window.RadioMesh = {
     start,

@@ -328,6 +328,16 @@ a:hover {
   white-space: pre-wrap;
 }
 
+/* Light theme: the dark-theme amber is invisible on a pale page, so use a
+   solid warm card with enough contrast for the announcement text. */
+html[data-theme="light"] .notice {
+  border-color: rgba(176, 108, 26, 0.28);
+  /* Same translucency as the dark theme; only the ink colour changes. */
+  background: rgba(255, 184, 107, 0.07);
+  color: #7a4a13;
+  box-shadow: 0 6px 18px rgba(23, 32, 51, 0.05);
+}
+
 .main-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
@@ -717,6 +727,11 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .lyrics-scroll {
+  /* The panel sets the scroll offset itself. Chrome's scroll anchoring would
+     also adjust it when the content above the viewport changes (the panel is
+     padded by half its height, and that padding changes with the layout), which
+     produced a late 30-40px jump after closing the full-lyrics view. */
+  overflow-anchor: none;
   position: relative;
   flex: 1;
   min-height: 0;
@@ -792,6 +807,15 @@ input[type="range"]::-moz-range-thumb {
   color: var(--faint);
   font-size: 13px;
   text-align: center;
+}
+
+/* No timestamps to follow: centre the placeholder in the whole panel instead
+   of letting it cling to the top edge. */
+.lyrics.is-empty {
+  min-height: 100%;
+  justify-content: center;
+  align-items: center;
+  padding: 0 !important;
 }
 
 .count-pill {
@@ -2368,6 +2392,23 @@ body.drawer-open {
   background: rgba(255, 125, 138, 0.1);
 }
 
+/* A one-shot upload cannot be requested again; the control stays visible so the
+   row keeps its shape, but it reads as unavailable. */
+.row-action:disabled,
+.row-action:disabled.add {
+  color: var(--faint);
+  border-color: var(--line);
+  background: transparent;
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.row-action:disabled:hover {
+  color: var(--faint);
+  border-color: var(--line);
+  background: transparent;
+}
+
 .row-action.active {
   color: var(--accent);
   border-color: rgba(255, 184, 107, 0.3);
@@ -2857,7 +2898,10 @@ body {
   border-radius: 25px;
   overflow: hidden;
   background: transparent;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.34);
+  /* Negative spread keeps the blur from bleeding into the top edge of the
+     clipped stage, which used to show up as a hard shadow line under the
+     announcement bar. */
+  box-shadow: 0 22px 40px -8px rgba(0, 0, 0, 0.45);
   cursor: pointer;
 }
 
@@ -2875,7 +2919,7 @@ body {
 .track-meta {
   width: min(74vw, 43vh, 460px);
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 14px;
   margin-top: 16px;
@@ -3486,9 +3530,12 @@ html[data-theme="light"] .drawer {
   animation: lyrics-meta-in 0.38s cubic-bezier(0.22, 0.8, 0.24, 1);
 }
 
+/* Fade only. The 10px slide moved the whole list after it had already been
+   centred on the live line, which read as the lyrics drifting up (and back
+   down on close). */
 @keyframes lyrics-panel-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes lyrics-meta-in {
@@ -4534,11 +4581,13 @@ html[data-theme="light"] .backdrop {
 }
 
 .lyrics-panel .lyric-line {
+  /* No font-size transition: animating the type size reflowed every row, so
+     opening the panel made the scroll target drift for 650ms and the live
+     line ended up above the window. Mode changes should switch in one step. */
   transition:
     color 0.65s cubic-bezier(0.22, 0.8, 0.24, 1),
     opacity 0.65s cubic-bezier(0.22, 0.8, 0.24, 1),
     transform 0.65s cubic-bezier(0.22, 0.8, 0.24, 1),
-    font-size 0.65s cubic-bezier(0.22, 0.8, 0.24, 1),
     background 0.65s ease;
 }
 
@@ -4554,10 +4603,11 @@ html[data-theme="light"] .backdrop {
   max-height: 76px;
   opacity: 1;
   overflow: hidden;
-  transition:
-    max-height 0.5s cubic-bezier(0.22, 0.8, 0.24, 1),
-    opacity 0.42s ease,
-    margin-top 0.5s cubic-bezier(0.22, 0.8, 0.24, 1);
+  /* Height and margin must not animate: this row sits in the same column as
+     the lyric window, so a 500ms slide resized the window frame by frame and
+     the lyrics crept upward (the "drifting" that only showed up when an
+     upcoming track existed). Only the fade animates now. */
+  transition: opacity 0.42s ease;
 }
 
 .next-track-info.empty {
@@ -4963,7 +5013,9 @@ html[data-theme="light"] .backdrop {
 .track-meta {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 42%);
-  align-items: end;
+  /* Title and artist/album share one optical centre line instead of sitting
+     on a common baseline, which read as bottom-aligned. */
+  align-items: center;
   column-gap: 14px;
 }
 
@@ -5456,6 +5508,19 @@ html[data-theme="light"] .admin-console-backdrop {
     background: rgba(13, 20, 33, 0.96);
     box-shadow: 0 12px 34px rgba(0, 0, 0, 0.32);
   }
+
+  /* The default thumb (13px + 2px borders = 17) is odd, so inside the 34px
+     capsule it lands on a half pixel and the track reads as sitting ~0.5px to
+     the left of the circle. An even size puts both centres on the same grid. */
+  .dock-volume.volume-open input[type="range"]::-webkit-slider-thumb {
+    width: 14px;
+    height: 14px;
+  }
+
+  .dock-volume.volume-open input[type="range"]::-moz-range-thumb {
+    width: 10px;
+    height: 10px;
+  }
 }
 
 /* Muted control changes appearance, not just its aria-label. */
@@ -5822,4 +5887,245 @@ html[data-theme="light"] .admin-profile-bar {
 .admin-profile-field > span {
   white-space: nowrap;
   flex: 0 0 auto;
+}
+
+/* ---------- Portrait playback: lyrics own the space between the track
+   metadata and the upcoming-track row ----------
+   The cover column is flattened so the lyric panel can be ordered between two
+   of its children without touching the DOM shared with the landscape grid. */
+@media (orientation: portrait) {
+  /* Text column (title / lyrics / next row) keeps the original metadata width;
+     the cover art keeps its own size and is excluded from that alignment. */
+  .playback-page:not(.lyrics-open) {
+    --portrait-col: min(78vw, 42vh, 460px);
+    --portrait-cover: min(74vw, 34vh, 420px);
+  }
+
+  .playback-page:not(.lyrics-open) .cover-column {
+    display: contents;
+  }
+
+  .playback-page:not(.lyrics-open) .playback-layout {
+    flex: 1 1 auto;
+    justify-content: flex-start;
+  }
+
+  .playback-page:not(.lyrics-open) .cover-button {
+    order: 1;
+    width: var(--portrait-cover);
+  }
+
+  .playback-page:not(.lyrics-open) .track-meta {
+    order: 2;
+    align-items: center;
+    width: var(--portrait-col);
+    margin-top: 14px;
+  }
+
+  /* The full lyric window replaces the single live line in portrait. */
+  .playback-page:not(.lyrics-open) .current-lyric {
+    display: none;
+  }
+
+  .playback-page:not(.lyrics-open) .lyrics-panel {
+    order: 3;
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: var(--portrait-col);
+    padding: 0;
+    margin-top: 8px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .playback-page:not(.lyrics-open) .lyrics-panel .lyrics-scroll {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+    padding: 0;
+  }
+
+  /* Text starts on the cover edge: no extra inset, so both blocks share the
+     same optical left margin. */
+  .playback-page:not(.lyrics-open) .lyrics-panel .lyric-line {
+    font-size: clamp(15px, 4.2vw, 20px);
+    padding: 5px 0;
+  }
+
+  /* The translation switch belongs to the full-lyrics mode; inline it would
+     float over the last lyric line. */
+  .playback-page:not(.lyrics-open) .lyrics-panel .toggle-btn {
+    display: none;
+  }
+
+  /* Keep the upcoming row out of the dock's upward shadow band and let it use
+     the full dynamic width of the lyric column. */
+  .playback-page:not(.lyrics-open) .next-track-info {
+    order: 4;
+    width: var(--portrait-col);
+    max-width: none;
+    margin-top: 10px;
+    margin-bottom: 14px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+
+/* Short portrait screens cannot host a lyric window at all: drop it and keep
+   the single live line with the next-track row pinned above the dock. */
+@media (orientation: portrait) and (max-height: 640px) {
+  .playback-page:not(.lyrics-open) .lyrics-panel {
+    display: none;
+  }
+
+  .playback-page:not(.lyrics-open) .current-lyric {
+    display: block;
+    order: 3;
+    width: var(--portrait-col);
+    margin-top: 10px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .playback-page:not(.lyrics-open) .next-track-info {
+    margin-top: auto;
+    margin-bottom: 12px;
+  }
+}
+
+/* Short portrait screens: shrink the cover column so the lyric window keeps at
+   least three readable lines above the upcoming-track row. */
+@media (orientation: portrait) and (max-height: 720px) {
+  .playback-page:not(.lyrics-open) {
+    --portrait-cover: min(70vw, 31vh, 380px);
+  }
+
+  .playback-page:not(.lyrics-open) .track-meta {
+    margin-top: 10px;
+  }
+
+  .playback-page:not(.lyrics-open) .lyrics-panel {
+    margin-top: 6px;
+  }
+
+  .playback-page:not(.lyrics-open) .next-track-info {
+    margin-top: 8px;
+    margin-bottom: 10px;
+  }
+}
+
+/* Keep the fallback row anchored above the dock on every short portrait size;
+   declared last so the taller-screen spacing above cannot win. */
+@media (orientation: portrait) and (max-height: 720px) {
+  .playback-page:not(.lyrics-open) .next-track-info {
+    margin-top: auto;
+  }
+}
+
+/* Without an inline lyric window the cover can use more of the width again. */
+@media (orientation: portrait) and (max-height: 640px) {
+  .playback-page:not(.lyrics-open) {
+    --portrait-cover: min(76vw, 40vh, 400px);
+  }
+}
+
+/* Full-lyrics portrait mode parks the title right on the dock. Give the
+   bottom block a little breathing room instead of gluing it to the edge. */
+@media (orientation: portrait) {
+  /* Lift the title off the dock, but keep the upcoming-track row on its
+     original baseline: the gap goes between the two blocks, not below both. */
+  .playback-page.lyrics-open .track-meta {
+    margin-bottom: 10px;
+  }
+}
+
+/* Bilingual-lyrics toggle: a real hiragana あ plus a small Latin A. Drawn as
+   text inside the SVG so the kana is the actual glyph instead of a path that
+   only approximated it. */
+.kana-icon {
+  fill: currentColor;
+  stroke: none;
+}
+
+.kana-icon text {
+  fill: currentColor;
+  stroke: none;
+}
+
+.kana-icon .kana-glyph {
+  font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic",
+    "Noto Sans JP", "Meiryo", system-ui, sans-serif;
+  font-size: 14.5px;
+  font-weight: 500;
+}
+
+.kana-icon .latin-glyph {
+  font-family: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+/* ---------- Active lyric emphasis without reflow ----------
+   Growing the active line with font-size re-wrapped its text mid-animation
+   (one line became two), so the whole list jumped. Use a scale transform for
+   the same visual growth: layout never changes, and the browser can animate it
+   on the compositor. The amount is capped per line in JS so scaled text never
+   runs past the column edge. */
+.lyrics-panel {
+  --lyric-fs: clamp(20px, 5.6vw, 29px);
+  --lyric-grow-max: 1.16;
+}
+
+@media (orientation: landscape) {
+  .lyrics-panel {
+    --lyric-fs: clamp(20px, 2.3vw, 30px);
+    --lyric-grow-max: 1.18;
+  }
+}
+
+/* Inline portrait uses the smaller type of the mobile layout. This must stay
+   inside the portrait query: unscoped it also matched the landscape inline view
+   and shrank the desktop lyrics from 29px to the 20px cap. */
+@media (orientation: portrait) {
+  .playback-page:not(.lyrics-open) .lyrics-panel {
+    --lyric-fs: clamp(15px, 4.2vw, 20px);
+  }
+}
+
+.lyrics-panel .lyric-line,
+.lyrics-panel .lyric-line.active {
+  font-size: var(--lyric-fs);
+  font-weight: inherit;
+}
+
+/* The scale lives on a shrink-wrapped wrapper so it grows around the text
+   instead of the full-width block. */
+.lyric-inner {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  transform-origin: left center;
+  transition: transform 0.65s cubic-bezier(0.22, 0.8, 0.24, 1);
+}
+
+/* Same emphasis as before (colour + weight + slight offset), but the weight is
+   faked with a stroke so glyph metrics do not change and text cannot re-wrap. */
+.lyrics-panel .lyric-line.active {
+  -webkit-text-stroke: 0.03em currentColor;
+  /* The offset now lives on the inner wrapper together with the scale. */
+  transform: none;
+}
+
+.lyrics-panel .lyric-line.active .lyric-inner {
+  transform: translateX(3px) scale(var(--lyric-grow, 1));
+}
+
+.lyrics-panel .lyric-line.active .lyric-text {
+  font-weight: inherit;
+}
+
+.lyrics-panel .lyric-line.active .lyric-translation {
+  -webkit-text-stroke: 0;
 }

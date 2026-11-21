@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +20,7 @@ import (
 var AudioExtensions = map[string]bool{
 	".mp3": true, ".m4a": true, ".aac": true, ".flac": true,
 	".ogg": true, ".oga": true, ".opus": true, ".wav": true,
-	".webm": true,
+	".webm": true, ".mp4": true,
 }
 
 type Track struct {
@@ -56,15 +57,119 @@ func fileTitle(path string) string {
 	return strings.TrimSpace(strings.TrimSuffix(base, filepath.Ext(base)))
 }
 
-func parseMetadata(path string) (title, artist, album string, durationMS int64) {
-	title, artist, album = fileTitle(path), "", ""
-	cmd := exec.Command("ffprobe", "-v", "error",
+// FileMeta is the sidecar record written by /api/upload next to the stored
+// audio file. A rescan prefers it over embedded tags so an upload keeps the
+// title the listener actually typed, not the generated storage name.
+type FileMeta struct {
+	Title        string `json:"title,omitempty"`
+	Artist       string `json:"artist,omitempty"`
+	Album        string `json:"album,omitempty"`
+	DurationMS   int64  `json:"duration_ms,omitempty"`
+	Nickname     string `json:"nickname,omitempty"`
+	OriginalName string `json:"original_name,omitempty"`
+	UploadedAt   int64  `json:"uploaded_at,omitempty"`
+}
+
+// MetaPath returns the sidecar path for an audio file.
+func MetaPath(path string) string { return path + ".json" }
+
+// ReadMeta loads the sidecar for path. Missing or broken sidecars are ignored.
+func ReadMeta(path string) (FileMeta, bool) {
+	raw, err := os.ReadFile(MetaPath(path))
+	if err != nil {
+		return FileMeta{}, false
+	}
+	var meta FileMeta
+	if json.Unmarshal(raw, &meta) != nil {
+		return FileMeta{}, false
+	}
+	return meta, true
+}
+
+// WriteMeta stores the sidecar for path.
+func WriteMeta(path string, meta FileMeta) error {
+	raw, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(MetaPath(path), raw, 0o600)
+}
+
+// RemoveMeta removes the sidecar for path, ignoring errors.
+func RemoveMeta(path string) { _ = os.Remove(MetaPath(path)) }
+
+var (
+	toolsOnce  sync.Once
+	ffprobeBin string
+	ffmpegBin  string
+)
+
+func resolveBinaries() {
+	ffprobeBin = findBinary("RADIO_FFPROBE", "ffprobe")
+	ffmpegBin = findBinary("RADIO_FFMPEG", "ffmpeg")
+}
+
+// findBinary resolves an ffmpeg-family tool. Explicit env wins, then PATH, then
+// the bundled data/bin and bin directories so a station started from anywhere
+// still finds the ffmpeg shipped in a release package.
+func findBinary(envKey, name string) string {
+	if custom := strings.TrimSpace(os.Getenv(envKey)); custom != "" {
+		return custom
+	}
+	if path, err := exec.LookPath(name); err == nil {
+		return path
+	}
+	candidates := []string{
+		filepath.Join("data", "bin", name),
+		filepath.Join("bin", name),
+	}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(dir, name),
+			filepath.Join(dir, "data", "bin", name),
+			filepath.Join(dir, "..", "data", "bin", name),
+		)
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if abs, err := filepath.Abs(candidate); err == nil {
+			return abs
+		}
+		return candidate
+	}
+	return ""
+}
+
+// ProbeFile reads duration and tags. ffprobe is preferred; when only ffmpeg is
+// installed the same facts are parsed out of `ffmpeg -i`, so a minimal package
+// without ffprobe still reports correct durations.
+func ProbeFile(path string) (title, artist, album string, durationMS int64) {
+	toolsOnce.Do(resolveBinaries)
+	if ffprobeBin != "" {
+		if t, a, al, d, ok := probeFFprobe(path); ok {
+			return t, a, al, d
+		}
+	}
+	if ffmpegBin != "" {
+		if t, a, al, d, ok := probeFFmpeg(path); ok {
+			return t, a, al, d
+		}
+	}
+	return "", "", "", 0
+}
+
+func probeFFprobe(path string) (title, artist, album string, durationMS int64, ok bool) {
+	cmd := exec.Command(ffprobeBin, "-v", "error",
 		"-show_entries", "format=duration:format_tags=title,artist,album",
 		"-of", "json", path)
-	cmd.WaitDelay = 2 * time.Second
+	cmd.WaitDelay = 3 * time.Second
 	out, err := cmd.Output()
 	if err != nil {
-		return
+		return "", "", "", 0, false
 	}
 	var payload struct {
 		Format struct {
@@ -73,20 +178,109 @@ func parseMetadata(path string) (title, artist, album string, durationMS int64) 
 		} `json:"format"`
 	}
 	if json.Unmarshal(out, &payload) != nil {
-		return
+		return "", "", "", 0, false
 	}
-	if value := strings.TrimSpace(payload.Format.Tags["title"]); value != "" {
-		title = value
-	}
-	artist = strings.TrimSpace(payload.Format.Tags["artist"])
-	album = strings.TrimSpace(payload.Format.Tags["album"])
+	title = pickTag(payload.Format.Tags, "title")
+	artist = pickTag(payload.Format.Tags, "artist", "album_artist")
+	album = pickTag(payload.Format.Tags, "album")
 	if payload.Format.Duration != "" {
 		var seconds float64
 		if _, err := fmt.Sscanf(payload.Format.Duration, "%f", &seconds); err == nil {
 			durationMS = int64(seconds * 1000)
 		}
 	}
-	return
+	return title, artist, album, durationMS, true
+}
+
+// pickTag matches tag names case-insensitively: FLAC and Ogg rips usually carry
+// TITLE/ARTIST/ALBUM in upper case, MP3 ID3 in lower case.
+func pickTag(tags map[string]string, names ...string) string {
+	for key, value := range tags {
+		lower := strings.ToLower(strings.TrimSpace(key))
+		for _, name := range names {
+			if lower == name {
+				if trimmed := strings.TrimSpace(value); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func probeFFmpeg(path string) (title, artist, album string, durationMS int64, ok bool) {
+	// ffmpeg -i exits non-zero without an output target but still prints the
+	// input metadata, which is all we need.
+	cmd := exec.Command(ffmpegBin, "-hide_banner", "-nostdin", "-i", path)
+	cmd.WaitDelay = 3 * time.Second
+	out, _ := cmd.CombinedOutput()
+	if len(out) == 0 {
+		return "", "", "", 0, false
+	}
+	for _, raw := range strings.Split(string(out), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(line), "duration:") {
+			if durationMS == 0 {
+				value := strings.TrimSpace(line[len("duration:"):])
+				if comma := strings.IndexByte(value, ','); comma >= 0 {
+					value = value[:comma]
+				}
+				durationMS = parseClockMS(strings.TrimSpace(value))
+			}
+			continue
+		}
+		key, value, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		key = strings.TrimPrefix(key, "tag:")
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		switch key {
+		case "title":
+			if title == "" {
+				title = value
+			}
+		case "artist":
+			if artist == "" {
+				artist = value
+			}
+		case "album":
+			if album == "" {
+				album = value
+			}
+		}
+	}
+	if durationMS == 0 && title == "" && artist == "" && album == "" {
+		return "", "", "", 0, false
+	}
+	return title, artist, album, durationMS, true
+}
+
+// parseClockMS converts "00:03:07.42" into milliseconds.
+func parseClockMS(value string) int64 {
+	parts := strings.Split(value, ":")
+	if len(parts) == 0 || len(parts) > 3 {
+		return 0
+	}
+	total := 0.0
+	for _, part := range parts {
+		seconds, err := strconv.ParseFloat(strings.TrimSpace(part), 64)
+		if err != nil {
+			return 0
+		}
+		total = total*60 + seconds
+	}
+	if total <= 0 {
+		return 0
+	}
+	return int64(total * 1000)
 }
 
 func scanFile(path string) *Track {
@@ -94,17 +288,66 @@ func scanFile(path string) *Track {
 	if !AudioExtensions[ext] {
 		return nil
 	}
-	title, artist, album, duration := parseMetadata(path)
+	title, artist, album, duration := ProbeFile(path)
+	meta, hasMeta := ReadMeta(path)
+	if hasMeta {
+		if meta.Title != "" {
+			title = meta.Title
+		}
+		if meta.Artist != "" {
+			artist = meta.Artist
+		}
+		if meta.Album != "" {
+			album = meta.Album
+		}
+		if meta.DurationMS > 0 {
+			duration = meta.DurationMS
+		}
+	}
 	if title == "" {
 		title = fileTitle(path)
 	}
 	id := trackID(path)
+	// Only /api/upload writes a sidecar, so its presence marks a one-shot
+	// upload. The distinction survives rescans and restarts, which matters
+	// because an upload must not be requestable again once it played.
+	source := "local"
+	if hasMeta {
+		source = "upload"
+	}
 	return &Track{
 		ID: id, Title: title, Artist: artist, Album: album,
 		DurationMS: duration, Format: strings.TrimPrefix(ext, "."),
-		Path: path, Source: "local", SourceID: id,
+		Path: path, Source: source, SourceID: id,
 		CoverURL: "/api/local-cover/" + id,
 	}
+}
+
+// AddFile probes a single audio file and inserts it into the index without
+// rescanning (and reshuffling) the whole library.
+func (i *Index) AddFile(path string) (Track, bool) {
+	track := scanFile(path)
+	if track == nil {
+		return Track{}, false
+	}
+	i.Put(track)
+	return *track, true
+}
+
+// Put inserts or replaces a track in the index.
+func (i *Index) Put(track *Track) {
+	if track == nil {
+		return
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.tracks == nil {
+		i.tracks = map[string]*Track{}
+	}
+	if _, exists := i.tracks[track.ID]; !exists {
+		i.order = append(i.order, track.ID)
+	}
+	i.tracks[track.ID] = track
 }
 
 func (i *Index) Scan(dirs []string, maxFiles int) (int, error) {

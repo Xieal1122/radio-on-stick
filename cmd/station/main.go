@@ -4,16 +4,17 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
-	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,41 +32,41 @@ import (
 )
 
 type api struct {
-	index      *library.Index
-	libraryDir []string
-	adminToken string
-	scanMu     sync.Mutex
-	state      *station.State
-	source     *stream.Hub
-	mesh       *mesh.Hub
-	rtc        *rtcseed.Source
-	meshSTUN   string
-	mediaMode  string
-	httpLeafMax int
-	httpLeaves  map[string]time.Time
-	leafMu      sync.Mutex
-	staticDir  string
-	uploadsDir string
-	directory  *directory.Client
-	joinRequired bool
-	joinSecret   string
-	plugins      *plugins.Client
+	index          *library.Index
+	libraryDir     []string
+	adminToken     string
+	scanMu         sync.Mutex
+	state          *station.State
+	source         *stream.Hub
+	mesh           *mesh.Hub
+	rtc            *rtcseed.Source
+	meshSTUN       string
+	mediaMode      string
+	httpLeafMax    int
+	httpLeaves     map[string]time.Time
+	leafMu         sync.Mutex
+	staticDir      string
+	uploadsDir     string
+	directory      *directory.Client
+	joinRequired   bool
+	joinSecret     string
+	plugins        *plugins.Client
 	backgroundsDir string
-	backgroundMu sync.Mutex
+	backgroundMu   sync.Mutex
 	backgroundURLs []string
 	backgroundFile string
-	libraryFile   string
-	pluginMu      sync.Mutex
-	pluginCache   map[string]plugins.Candidate
-	listenerMu    sync.Mutex
-	listeners     map[string]time.Time
-	listenerNames map[string]string
-	mp3Mu         sync.Mutex
-	mp3Cache      map[string]bool
-	ownerIPs      map[string]bool
-	limitMu       sync.Mutex
-	limits        map[string]map[string][]int64
-	bannedWords   []string
+	libraryFile    string
+	pluginMu       sync.Mutex
+	pluginCache    map[string]plugins.Candidate
+	listenerMu     sync.Mutex
+	listeners      map[string]time.Time
+	listenerNames  map[string]string
+	mp3Mu          sync.Mutex
+	mp3Cache       map[string]bool
+	ownerIPs       map[string]bool
+	limitMu        sync.Mutex
+	limits         map[string]map[string][]int64
+	bannedWords    []string
 }
 
 func (a *api) banned(texts ...string) bool {
@@ -129,9 +130,13 @@ func splitWords(raw string) []string {
 
 func envInt(key string, fallback int) int {
 	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" { return fallback }
+	if raw == "" {
+		return fallback
+	}
 	value, err := strconv.Atoi(raw)
-	if err != nil { return fallback }
+	if err != nil {
+		return fallback
+	}
 	return value
 }
 
@@ -267,7 +272,25 @@ func (a *api) stream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": "stat_failed"})
 		return
 	}
+	// Safari is strict about media MIME types and the system mime table reports
+	// FLAC as audio/x-flac, which iOS refuses to play. Serve the standard types.
+	if mime, ok := audioMIME[strings.ToLower(filepath.Ext(track.Path))]; ok {
+		w.Header().Set("Content-Type", mime)
+	}
 	http.ServeContent(w, r, filepath.Base(track.Path), info.ModTime(), file)
+}
+
+// audioMIME lists the container types the station can serve straight from disk.
+var audioMIME = map[string]string{
+	".mp3":  "audio/mpeg",
+	".m4a":  "audio/mp4",
+	".aac":  "audio/aac",
+	".flac": "audio/flac",
+	".wav":  "audio/wav",
+	".ogg":  "audio/ogg",
+	".oga":  "audio/ogg",
+	".opus": "audio/ogg",
+	".webm": "audio/webm",
 }
 
 func ownerSet(raw string) map[string]bool {
@@ -379,14 +402,16 @@ func (a *api) listenersAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) now(w http.ResponseWriter, r *http.Request) {
-	a.touchListener(w, r, "")
+	// The poll carries the nickname so presence is known without the listener
+	// having to open the "listening now" list first.
+	a.touchListener(w, r, strings.TrimSpace(r.URL.Query().Get("nickname")))
 	snapshot := a.state.Snapshot()
 	snapshot["mesh"] = map[string]any{"enabled": true, "ws_url": "/ws", "stun": a.meshSTUN}
 	writeJSON(w, 200, snapshot)
 }
 
 func (a *api) stateJSON(w http.ResponseWriter, r *http.Request) {
-	state := a.state.State(a.touchListener(w, r, ""))
+	state := a.state.State(a.touchListener(w, r, strings.TrimSpace(r.URL.Query().Get("nickname"))))
 	if now, ok := state["now"].(map[string]any); ok {
 		now["mesh"] = map[string]any{"enabled": true, "ws_url": "/ws", "stun": a.meshSTUN}
 	}
@@ -428,16 +453,42 @@ func (a *api) config(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, settings)
 }
 
+// isOneShotUpload reports whether the id belongs to a one-shot upload, either
+// still indexed or already consumed and only remembered in the history.
+func (a *api) isOneShotUpload(trackID string) bool {
+	if trackID == "" || strings.Contains(trackID, ":") {
+		return false
+	}
+	if track, ok := a.index.Get(trackID); ok && strings.EqualFold(track.Source, "upload") {
+		return true
+	}
+	if track, ok := a.state.TrackByID(trackID); ok && strings.EqualFold(track.Source, "upload") {
+		return true
+	}
+	if history, ok := a.state.HistoryByTrackID(trackID); ok && strings.EqualFold(history.Source, "upload") {
+		return true
+	}
+	return false
+}
+
 func (a *api) requestTrack(trackID string) (library.Track, bool) {
 	history, hasHistory := a.state.HistoryByTrackID(trackID)
 	fillHistory := func(track *library.Track) {
 		if !hasHistory {
 			return
 		}
-		if track.Title == "" { track.Title = history.Title }
-		if track.Artist == "" { track.Artist = history.Artist }
-		if track.CoverURL == "" { track.CoverURL = history.CoverURL }
-		if track.DurationMS == 0 { track.DurationMS = history.DurationMS }
+		if track.Title == "" {
+			track.Title = history.Title
+		}
+		if track.Artist == "" {
+			track.Artist = history.Artist
+		}
+		if track.CoverURL == "" {
+			track.CoverURL = history.CoverURL
+		}
+		if track.DurationMS == 0 {
+			track.DurationMS = history.DurationMS
+		}
 	}
 	if source, sourceID, found := strings.Cut(trackID, ":"); found {
 		a.pluginMu.Lock()
@@ -471,11 +522,21 @@ func (a *api) requestTrack(trackID string) (library.Track, bool) {
 			}
 		}
 		if cached {
-			if resolved.Title == "" { resolved.Title = item.Title }
-			if resolved.Artist == "" { resolved.Artist = item.Artist }
-			if resolved.Album == "" { resolved.Album = item.Album }
-			if resolved.DurationMS == 0 { resolved.DurationMS = item.DurationMS }
-			if resolved.CoverURL == "" { resolved.CoverURL = item.CoverURL }
+			if resolved.Title == "" {
+				resolved.Title = item.Title
+			}
+			if resolved.Artist == "" {
+				resolved.Artist = item.Artist
+			}
+			if resolved.Album == "" {
+				resolved.Album = item.Album
+			}
+			if resolved.DurationMS == 0 {
+				resolved.DurationMS = item.DurationMS
+			}
+			if resolved.CoverURL == "" {
+				resolved.CoverURL = item.CoverURL
+			}
 		}
 		track := library.Track{
 			ID: trackID, Title: resolved.Title, Artist: resolved.Artist,
@@ -496,6 +557,12 @@ func (a *api) requestTrack(trackID string) (library.Track, bool) {
 	if !found {
 		return library.Track{}, false
 	}
+	// Local files and uploads only exist while they are indexed. A history row
+	// for a deleted file must not resurrect into a permanently broken queue
+	// entry (the upload is gone after it played once).
+	if history.Source == "" || strings.EqualFold(history.Source, "local") || strings.EqualFold(history.Source, "upload") {
+		return library.Track{}, false
+	}
 	return a.trackFromHistory(history)
 }
 
@@ -509,8 +576,12 @@ func (a *api) trackFromHistory(history station.History) (library.Track, bool) {
 		resolved, err := a.plugins.Resolve(track.Source, track.SourceID)
 		if err == nil && resolved.AudioURL != "" {
 			track.URL = resolved.AudioURL
-			if track.DurationMS == 0 { track.DurationMS = resolved.DurationMS }
-			if track.CoverURL == "" { track.CoverURL = resolved.CoverURL }
+			if track.DurationMS == 0 {
+				track.DurationMS = resolved.DurationMS
+			}
+			if track.CoverURL == "" {
+				track.CoverURL = resolved.CoverURL
+			}
 		}
 	}
 	if track.Source == "" {
@@ -518,7 +589,9 @@ func (a *api) trackFromHistory(history station.History) (library.Track, bool) {
 		query := strings.TrimSpace(track.Title + " " + track.Artist)
 		if query != "" {
 			for _, item := range a.plugins.Search(query) {
-				if item.Source == "" || item.SourceID == "" { continue }
+				if item.Source == "" || item.SourceID == "" {
+					continue
+				}
 				track.Source = item.Source
 				track.SourceID = item.SourceID
 				track.DurationMS = item.DurationMS
@@ -540,31 +613,61 @@ func (a *api) trackFromHistory(history station.History) (library.Track, bool) {
 }
 
 func (a *api) ensureTrackAudio(track *library.Track) bool {
-	if track == nil || track.ID == "" { return false }
+	if track == nil || track.ID == "" {
+		return false
+	}
 	// Local library and uploads are files, not remote URLs; they are served by
 	// /native and /source directly from Path.
 	if track.Path != "" {
 		if latest, ok := a.index.Get(track.ID); ok {
-			if track.CoverURL == "" { track.CoverURL = latest.CoverURL }
-			if track.Title == "" { track.Title = latest.Title }
-			if track.Artist == "" { track.Artist = latest.Artist }
-			if track.Album == "" { track.Album = latest.Album }
-			if track.DurationMS == 0 { track.DurationMS = latest.DurationMS }
+			if track.CoverURL == "" {
+				track.CoverURL = latest.CoverURL
+			}
+			if track.Title == "" {
+				track.Title = latest.Title
+			}
+			if track.Artist == "" {
+				track.Artist = latest.Artist
+			}
+			if track.Album == "" {
+				track.Album = latest.Album
+			}
+			if track.DurationMS == 0 {
+				track.DurationMS = latest.DurationMS
+			}
 			a.state.UpdateTrackMetadata(*track)
 		}
 		return true
 	}
 	needsMetadata := track.Title == "" || track.Album == ""
-	if track.URL != "" && !needsMetadata { return true }
-	if track.Source == "" || track.SourceID == "" { return false }
+	if track.URL != "" && !needsMetadata {
+		return true
+	}
+	if track.Source == "" || track.SourceID == "" {
+		return false
+	}
 	resolved, err := a.plugins.Resolve(track.Source, track.SourceID)
-	if err != nil || resolved.AudioURL == "" { return false }
-	if track.URL == "" { track.URL = resolved.AudioURL }
-	if track.Title == "" { track.Title = resolved.Title }
-	if track.Artist == "" { track.Artist = resolved.Artist }
-	if track.Album == "" { track.Album = resolved.Album }
-	if track.DurationMS == 0 { track.DurationMS = resolved.DurationMS }
-	if track.CoverURL == "" { track.CoverURL = resolved.CoverURL }
+	if err != nil || resolved.AudioURL == "" {
+		return false
+	}
+	if track.URL == "" {
+		track.URL = resolved.AudioURL
+	}
+	if track.Title == "" {
+		track.Title = resolved.Title
+	}
+	if track.Artist == "" {
+		track.Artist = resolved.Artist
+	}
+	if track.Album == "" {
+		track.Album = resolved.Album
+	}
+	if track.DurationMS == 0 {
+		track.DurationMS = resolved.DurationMS
+	}
+	if track.CoverURL == "" {
+		track.CoverURL = resolved.CoverURL
+	}
 	a.state.SetTrackAudio(track.ID, track.URL)
 	a.state.UpdateTrackMetadata(*track)
 	return true
@@ -600,9 +703,16 @@ func (a *api) request(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "missing_track_id"})
 		return
 	}
+	if a.isOneShotUpload(trackID) {
+		writeJSON(w, 410, map[string]any{
+			"error":   "upload_one_shot",
+			"message": "上传的曲目只播放一次，已不能再次点歌",
+		})
+		return
+	}
 	track, ok := a.requestTrack(trackID)
 	if !ok {
-		writeJSON(w, 404, map[string]any{"error": "not_found"})
+		writeJSON(w, 404, map[string]any{"error": "not_found", "message": "这首已经不在曲库里了"})
 		return
 	}
 	if a.banned(body.Nickname) {
@@ -908,6 +1018,9 @@ func (a *api) native(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": "stat_failed"})
 		return
 	}
+	if mime, ok := audioMIME[strings.ToLower(filepath.Ext(track.Path))]; ok {
+		w.Header().Set("Content-Type", mime)
+	}
 	http.ServeContent(w, r, filepath.Base(track.Path), info.ModTime(), file)
 }
 
@@ -991,7 +1104,7 @@ func (a *api) secure(next http.Handler) http.Handler {
 		"/admin.css": true, "/placeholder.svg": true, "/manifest.webmanifest": true,
 		"/sw.js": true, "/favicon.ico": true, "/healthz": true, "/api/config": true,
 		"/api/server-rtc/offer": true,
-		"/api/join": true, "/admin": true, "/admin/": true,
+		"/api/join":             true, "/admin": true, "/admin/": true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.ownerRequest(r) {
@@ -1056,7 +1169,9 @@ func (a *api) adminBackgroundDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 401, map[string]any{"error": "unauthorized"})
 		return
 	}
-	var body struct{ Name string `json:"name"` }
+	var body struct {
+		Name string `json:"name"`
+	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil || strings.ContainsAny(body.Name, "/\\") {
 		writeJSON(w, 400, map[string]any{"error": "bad_name"})
 		return
@@ -1070,7 +1185,9 @@ func (a *api) adminBackgroundURL(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 401, map[string]any{"error": "unauthorized"})
 		return
 	}
-	var body struct{ URL string `json:"url"` }
+	var body struct {
+		URL string `json:"url"`
+	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
 		writeJSON(w, 400, map[string]any{"error": "bad_json"})
 		return
@@ -1199,54 +1316,190 @@ func (a *api) queuePin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "pinned": pinned})
 }
 
+const uploadMaxBytes = 64 << 20
+
+// uploadFamilies maps an extension to the container family its bytes must
+// belong to, so a renamed file cannot smuggle non-audio content into the queue.
+var uploadFamilies = map[string]string{
+	".mp3": "mpeg", ".aac": "mpeg",
+	".m4a": "mp4", ".mp4": "mp4",
+	".ogg": "ogg", ".oga": "ogg", ".opus": "ogg",
+	".wav": "wav", ".flac": "flac", ".webm": "webm",
+}
+
+func sniffAudioFamily(head []byte) string {
+	switch {
+	case len(head) >= 4 && string(head[:4]) == "fLaC":
+		return "flac"
+	case len(head) >= 4 && string(head[:4]) == "OggS":
+		return "ogg"
+	case len(head) >= 12 && string(head[:4]) == "RIFF" && string(head[8:12]) == "WAVE":
+		return "wav"
+	case len(head) >= 12 && string(head[4:8]) == "ftyp":
+		return "mp4"
+	case len(head) >= 4 && string(head[:4]) == "\x1a\x45\xdf\xa3":
+		return "webm"
+	case len(head) >= 3 && string(head[:3]) == "ID3":
+		return "mpeg"
+	case len(head) >= 2 && head[0] == 0xFF && head[1]&0xE0 == 0xE0:
+		// MPEG audio frames and ADTS AAC share this sync word.
+		return "mpeg"
+	}
+	return ""
+}
+
+func clipText(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if limit <= 0 {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) > limit {
+		value = string(runes[:limit])
+	}
+	return value
+}
+
+func headerText(r *http.Request, name string) string {
+	value := r.Header.Get(name)
+	if decoded, err := url.QueryUnescape(value); err == nil {
+		return decoded
+	}
+	return value
+}
+
 func (a *api) upload(w http.ResponseWriter, r *http.Request) {
 	if !a.allow("upload", a.clientIP(r), 5, time.Minute) {
 		a.rateLimited(w, "上传")
 		return
 	}
 	if !a.policyEnabled("uploads_enabled") {
-		writeJSON(w, 403, map[string]any{"error": "uploads_disabled"})
+		writeJSON(w, 403, map[string]any{"error": "uploads_disabled", "message": "管理员已关闭上传点歌"})
 		return
 	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, 405, map[string]any{"error": "method"})
 		return
 	}
-	filename := r.Header.Get("X-Filename")
-	if decoded, err := url.QueryUnescape(filename); err == nil {
-		filename = decoded
-	}
+	filename := filepath.Base(strings.TrimSpace(headerText(r, "X-Filename")))
 	ext := strings.ToLower(filepath.Ext(filename))
-	allowed := map[string]bool{".mp3": true, ".aac": true, ".m4a": true, ".ogg": true, ".oga": true, ".opus": true, ".wav": true, ".flac": true, ".webm": true}
-	if mp3Only, ok := a.state.Policy()["mp3_upload_only"].(bool); ok && mp3Only && ext != ".mp3" {
-		writeJSON(w, 415, map[string]any{"error": "mp3_only"})
+	family, allowed := uploadFamilies[ext]
+	if !allowed {
+		writeJSON(w, 415, map[string]any{"error": "bad_extension", "message": "只支持 mp3/aac/m4a/ogg/opus/webm/wav/flac"})
 		return
 	}
-	if !allowed[ext] {
-		writeJSON(w, 400, map[string]any{"error": "bad_extension"})
+	if mp3Only, ok := a.state.Policy()["mp3_upload_only"].(bool); ok && mp3Only && ext != ".mp3" {
+		writeJSON(w, 415, map[string]any{"error": "mp3_only", "message": "管理员只允许上传 MP3"})
 		return
+	}
+	nickname := clipText(headerText(r, "X-Nickname"), 32)
+	if nickname == "" {
+		nickname = "匿名"
+	}
+	title := clipText(headerText(r, "X-Title"), 120)
+	artist := clipText(headerText(r, "X-Artist"), 80)
+	if a.banned(nickname, title, artist) {
+		writeJSON(w, 400, map[string]any{"error": "blocked_word", "message": "内容包含禁用词"})
+		return
+	}
+	durationHint := int64(0)
+	if raw := strings.TrimSpace(r.Header.Get("X-Duration-Ms")); raw != "" {
+		if value, err := strconv.ParseInt(raw, 10, 64); err == nil && value > 0 {
+			durationHint = value
+		}
+	}
+	uploadsDir, err := filepath.Abs(a.uploadsDir)
+	if err != nil {
+		uploadsDir = a.uploadsDir
 	}
 	base := fmt.Sprintf("upload-%d%s", time.Now().UnixNano(), ext)
-	path := filepath.Join(a.uploadsDir, base)
+	path := filepath.Join(uploadsDir, base)
 	file, err := os.Create(path)
 	if err != nil {
-		writeJSON(w, 500, map[string]any{"error": "open_failed"})
+		writeJSON(w, 500, map[string]any{"error": "open_failed", "message": "无法写入上传目录"})
 		return
 	}
-	limited := io.LimitReader(r.Body, 64*1024*1024)
-	n, err := io.Copy(file, limited)
-	_ = file.Close()
-	if err != nil || n == 0 {
+	n, copyErr := io.Copy(file, http.MaxBytesReader(w, r.Body, uploadMaxBytes))
+	closeErr := file.Close()
+	var tooLarge *http.MaxBytesError
+	if errors.As(copyErr, &tooLarge) {
 		_ = os.Remove(path)
-		writeJSON(w, 400, map[string]any{"error": "upload_failed"})
+		writeJSON(w, 413, map[string]any{"error": "upload_too_large", "message": "音频文件不能超过 64MB"})
 		return
 	}
-	if _, err := a.index.Scan(append(append([]string{}, a.libraryDir...), a.uploadsDir), 50000); err != nil {
-		writeJSON(w, 500, map[string]any{"error": "scan_failed"})
+	if copyErr != nil || closeErr != nil || n == 0 {
+		_ = os.Remove(path)
+		writeJSON(w, 400, map[string]any{"error": "upload_failed", "message": "上传中断，请重试"})
 		return
 	}
-	a.state.Rebuild()
-	writeJSON(w, 200, map[string]any{"ok": true, "name": base})
+	head := make([]byte, 512)
+	if handle, err := os.Open(path); err == nil {
+		read, _ := io.ReadFull(handle, head)
+		head = head[:read]
+		_ = handle.Close()
+	}
+	if sniffed := sniffAudioFamily(head); sniffed == "" || sniffed != family {
+		_ = os.Remove(path)
+		writeJSON(w, 415, map[string]any{"error": "unsupported_audio", "message": "文件内容不是有效音频，或与扩展名不符"})
+		return
+	}
+	// Duration and tags come from the file itself; headers fill the gaps for
+	// formats the local ffmpeg build cannot probe.
+	probeTitle, probeArtist, probeAlbum, probeDuration := library.ProbeFile(path)
+	// Embedded tags beat the filename the client sent: the browser always
+	// derives X-Title from the file name, which is worse than real metadata.
+	if probeTitle != "" {
+		title = probeTitle
+	}
+	if title == "" {
+		title = clipText(strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename)), 120)
+	}
+	if title == "" {
+		title = "本地音频"
+	}
+	if probeArtist != "" {
+		artist = probeArtist
+	}
+	if artist == "" {
+		artist = nickname
+	}
+	album := probeAlbum
+	if album == "" {
+		album = "本地上传"
+	}
+	duration := probeDuration
+	if duration <= 0 {
+		duration = durationHint
+	}
+	if duration <= 0 {
+		// Unknown length must not stall the rotation: Tick never advances a
+		// track whose duration is zero.
+		duration = 240_000
+	}
+	if duration < 1000 {
+		duration = 1000
+	}
+	if duration > 12*60*60*1000 {
+		duration = 12 * 60 * 60 * 1000
+	}
+	if err := library.WriteMeta(path, library.FileMeta{
+		Title: title, Artist: artist, Album: album, DurationMS: duration,
+		Nickname: nickname, OriginalName: filename,
+		UploadedAt: time.Now().UnixMilli(),
+	}); err != nil {
+		log.Printf("upload meta %s: %v", base, err)
+	}
+	track, ok := a.index.AddFile(path)
+	if !ok {
+		_ = os.Remove(path)
+		library.RemoveMeta(path)
+		writeJSON(w, 500, map[string]any{"error": "index_failed", "message": "音频索引失败"})
+		return
+	}
+	// Upload is a point-request: it lands in the queue instead of silently
+	// joining the shuffled library rotation.
+	a.state.Request(track, nickname, a.touchListener(w, r, nickname))
+	writeJSON(w, 200, map[string]any{"ok": true, "name": base, "track": track, "nickname": nickname})
 }
 
 func (a *api) messages(w http.ResponseWriter, r *http.Request) {
@@ -1321,7 +1574,9 @@ func normalizeLocalLRC(text string) string {
 					lyric.WriteString(part.Tx)
 				}
 				ms := payload.T
-				if ms < 0 { ms = 0 }
+				if ms < 0 {
+					ms = 0
+				}
 				minutes := ms / 60000
 				seconds := (ms % 60000) / 1000
 				millis := ms % 1000
@@ -1554,7 +1809,12 @@ func (a *api) adminState(w http.ResponseWriter, r *http.Request) {
 		"policy": a.state.Policy(), "settings": a.state.Settings(),
 		"tracks": a.index.List(200), "backgrounds": a.backgroundItems(),
 		"library": map[string]any{"dirs": a.libraryDir, "tracks": a.index.Count()},
-		"directory": func() any { if a.directory == nil { return map[string]any{"enabled": false} }; return a.directory.Status(true) }(),
+		"directory": func() any {
+			if a.directory == nil {
+				return map[string]any{"enabled": false}
+			}
+			return a.directory.Status(true)
+		}(),
 	}
 	writeJSON(w, 200, result)
 }
@@ -1701,7 +1961,9 @@ func (a *api) adminDeleteMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 401, map[string]any{"error": "unauthorized"})
 		return
 	}
-	var body struct{ ID string `json:"id"` }
+	var body struct {
+		ID string `json:"id"`
+	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
 		writeJSON(w, 400, map[string]any{"error": "bad_json"})
 		return
@@ -1746,7 +2008,7 @@ func (a *api) searchAll(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0, len(tracks)+limit)
 	for _, track := range tracks {
 		items = append(items, map[string]any{
-			"id": track.ID, "source": "local", "source_id": track.ID,
+			"id": track.ID, "source": track.Source, "source_id": track.ID,
 			"title": track.Title, "artist": track.Artist, "album": track.Album,
 			"duration_ms": track.DurationMS, "cover_url": track.CoverURL, "candidate_id": track.ID,
 		})
@@ -1779,21 +2041,31 @@ func (a *api) searchAll(w http.ResponseWriter, r *http.Request) {
 	}
 	order := []string{"local", "bilibili", "netease", "qq"}
 	seenOrder := map[string]bool{}
-	for _, source := range order { seenOrder[source] = true }
+	for _, source := range order {
+		seenOrder[source] = true
+	}
 	for source := range groups {
-		if !seenOrder[source] { order = append(order, source) }
+		if !seenOrder[source] {
+			order = append(order, source)
+		}
 	}
 	mixed := make([]map[string]any, 0, limit)
 	for round := 0; len(mixed) < limit; round++ {
 		added := false
 		for _, source := range order {
 			group := groups[source]
-			if round >= len(group) { continue }
+			if round >= len(group) {
+				continue
+			}
 			mixed = append(mixed, group[round])
 			added = true
-			if len(mixed) >= limit { break }
+			if len(mixed) >= limit {
+				break
+			}
 		}
-		if !added { break }
+		if !added {
+			break
+		}
 	}
 	writeJSON(w, 200, map[string]any{"items": mixed, "candidates": mixed, "results": mixed})
 }
@@ -1837,13 +2109,20 @@ func main() {
 	// indexed library, leaving the station with no current track after restart.
 	state.Rebuild()
 	if os.Getenv("RADIO_GO_KEEP_UPLOADS") != "1" {
+		// Indexed tracks carry absolute paths, so the guarded prefix has to be
+		// absolute too; a relative prefix made every one-shot upload immortal.
+		uploadsRoot, err := filepath.Abs(uploadsDir)
+		if err != nil {
+			uploadsRoot = uploadsDir
+		}
+		uploadsRoot = filepath.Clean(uploadsRoot) + string(os.PathSeparator)
 		state.SetAdvanceHook(func(track library.Track) {
 			path := filepath.Clean(track.Path)
-			root := filepath.Clean(uploadsDir) + string(os.PathSeparator)
-			if path == "" || !strings.HasPrefix(path, root) {
+			if path == "" || !strings.HasPrefix(path, uploadsRoot) {
 				return
 			}
 			_ = os.Remove(path)
+			library.RemoveMeta(path)
 			index.Remove(track.ID)
 		})
 	}
@@ -1880,31 +2159,31 @@ func main() {
 		os.Exit(0)
 	}()
 	a := &api{
-		index:      index,
-		libraryDir: clean,
-		adminToken: os.Getenv("RADIO_GO_ADMIN_TOKEN"),
-		state:      state,
-		source:     stream.NewHub(),
-		mesh:       meshHub,
-		rtc:        rtcSource,
-		meshSTUN:   os.Getenv("RADIO_MESH_STUN"),
-		mediaMode:  mediaMode,
-		staticDir:  env("RADIO_STATIC_DIR", "web/static"),
-		uploadsDir: env("RADIO_GO_UPLOADS", "data/uploads"),
-		directory: directoryClient,
-		joinRequired: os.Getenv("RADIO_JOIN_REQUIRED") == "1",
-		joinSecret: env("RADIO_JOIN_SECRET", env("RADIO_GO_ADMIN_TOKEN", "go-join-secret")),
-		plugins:    plugins.New(env("RADIO_PRIVATE_PYTHON", "python3"), env("RADIO_PRIVATE_HELPER", "plugins/commercial/helper.py")),
+		index:          index,
+		libraryDir:     clean,
+		adminToken:     os.Getenv("RADIO_GO_ADMIN_TOKEN"),
+		state:          state,
+		source:         stream.NewHub(),
+		mesh:           meshHub,
+		rtc:            rtcSource,
+		meshSTUN:       os.Getenv("RADIO_MESH_STUN"),
+		mediaMode:      mediaMode,
+		staticDir:      env("RADIO_STATIC_DIR", "web/static"),
+		uploadsDir:     env("RADIO_GO_UPLOADS", "data/uploads"),
+		directory:      directoryClient,
+		joinRequired:   os.Getenv("RADIO_JOIN_REQUIRED") == "1",
+		joinSecret:     env("RADIO_JOIN_SECRET", env("RADIO_GO_ADMIN_TOKEN", "go-join-secret")),
+		plugins:        plugins.New(env("RADIO_PRIVATE_PYTHON", "python3"), env("RADIO_PRIVATE_HELPER", "plugins/commercial/helper.py")),
 		backgroundsDir: env("RADIO_GO_BACKGROUNDS", "data/backgrounds"),
 		backgroundFile: env("RADIO_GO_BACKGROUND_URLS", "data/station-go-backgrounds.json"),
-		libraryFile:   libraryFile,
-		pluginCache: map[string]plugins.Candidate{},
-		listeners:   map[string]time.Time{},
-		listenerNames: map[string]string{},
-		mp3Cache:      map[string]bool{},
-		ownerIPs:      ownerSet(env("RADIO_OWNER_IPS", "127.0.0.1,::1")),
-		limits:        map[string]map[string][]int64{},
-		bannedWords:   splitWords(os.Getenv("RADIO_BANNED_WORDS")),
+		libraryFile:    libraryFile,
+		pluginCache:    map[string]plugins.Candidate{},
+		listeners:      map[string]time.Time{},
+		listenerNames:  map[string]string{},
+		mp3Cache:       map[string]bool{},
+		ownerIPs:       ownerSet(env("RADIO_OWNER_IPS", "127.0.0.1,::1")),
+		limits:         map[string]map[string][]int64{},
+		bannedWords:    splitWords(os.Getenv("RADIO_BANNED_WORDS")),
 	}
 	if raw, err := os.ReadFile(a.backgroundFile); err == nil {
 		_ = json.Unmarshal(raw, &a.backgroundURLs)
@@ -2015,7 +2294,11 @@ func main() {
 				}
 				info, err := entry.Info()
 				if err == nil && time.Since(info.ModTime()) > 24*time.Hour {
-					_ = os.Remove(filepath.Join(uploadsDir, entry.Name()))
+					target := filepath.Join(uploadsDir, entry.Name())
+					_ = os.Remove(target)
+					if !strings.HasSuffix(entry.Name(), ".json") {
+						library.RemoveMeta(target)
+					}
 				}
 			}
 		}

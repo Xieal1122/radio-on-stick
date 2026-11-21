@@ -152,7 +152,29 @@ func (s *State) Rebuild() {
 	})
 	s.queue = queue
 	if s.current.ID == "" {
-		s.advanceLocked()
+		s.advanceLocked("")
+	} else if latest, ok := s.index.Get(s.current.ID); ok {
+		// A persisted current track may predate a metadata repair or an upload
+		// sidecar. Refresh what the index knows without blanking fields the
+		// restored state legitimately carries.
+		if latest.Title != "" {
+			s.current.Title = latest.Title
+		}
+		if latest.Artist != "" {
+			s.current.Artist = latest.Artist
+		}
+		if latest.Album != "" {
+			s.current.Album = latest.Album
+		}
+		if latest.DurationMS > 0 {
+			s.current.DurationMS = latest.DurationMS
+		}
+		if latest.CoverURL != "" {
+			s.current.CoverURL = latest.CoverURL
+		}
+		if s.current.Path == "" {
+			s.current.Path = latest.Path
+		}
 	}
 	// A restored remote track is not in the local index. Preserve it unless
 	// the admin explicitly deletes the current track (adminTrackDelete calls
@@ -165,15 +187,19 @@ func (s *State) SetAdvanceHook(hook func(library.Track)) {
 	s.mu.Unlock()
 }
 
-func (s *State) advanceLocked() {
+func (s *State) advanceLocked(retiredID string) {
 	if s.paused || s.current.ID != "" {
 		return
 	}
-	old := s.current
 	// A new track always starts a fresh vote round, whether it was selected
 	// manually, by vote, or because the previous track ended naturally.
 	s.votes = map[string]bool{}
 	s.reorderQueueLocked()
+	if len(s.queue) == 0 {
+		// The rotation loops over the library. Without a refill the station
+		// went silent for good once every track had played once.
+		s.refillQueueLocked(retiredID)
+	}
 	if len(s.queue) == 0 {
 		return
 	}
@@ -204,11 +230,33 @@ func (s *State) advanceLocked() {
 		}
 	}
 	s.saveLocked()
-	if old.ID != "" && s.onAdvance != nil {
-		// Upload lifecycle cleanup runs after the new track is committed and
-		// never touches paths outside the configured uploads directory.
-		s.onAdvance(old)
+}
+
+// refillQueueLocked reshuffles the library into the rotation. The track that
+// just ended goes to the back so a small library still cycles instead of
+// repeating itself immediately.
+func (s *State) refillQueueLocked(retiredID string) {
+	tracks := s.index.List(50000)
+	if len(tracks) == 0 {
+		return
 	}
+	queue := make([]library.Track, 0, len(tracks))
+	retired := library.Track{}
+	hasRetired := false
+	for _, track := range tracks {
+		if retiredID != "" && track.ID == retiredID {
+			retired, hasRetired = track, true
+			continue
+		}
+		queue = append(queue, track)
+	}
+	rand.Shuffle(len(queue), func(a, b int) {
+		queue[a], queue[b] = queue[b], queue[a]
+	})
+	if hasRetired {
+		queue = append(queue, retired)
+	}
+	s.queue = queue
 }
 
 func (s *State) tickLocked(now time.Time) {
@@ -219,9 +267,20 @@ func (s *State) tickLocked(now time.Time) {
 		return
 	}
 	if now.Sub(s.started) >= time.Duration(s.current.DurationMS)*time.Millisecond {
-		s.current = library.Track{}
-		s.started = time.Time{}
-		s.advanceLocked()
+		s.finishCurrentLocked()
+	}
+}
+
+// finishCurrentLocked retires the playing track and starts the next one. It is
+// the single place that runs the advance hook: skip, natural end and vote all
+// go through here so a one-shot upload is still cleaned up when it is skipped.
+func (s *State) finishCurrentLocked() {
+	old := s.current
+	s.current = library.Track{}
+	s.started = time.Time{}
+	s.advanceLocked(old.ID)
+	if old.ID != "" && s.current.ID != old.ID && s.onAdvance != nil {
+		s.onAdvance(old)
 	}
 }
 
@@ -261,7 +320,7 @@ func (s *State) Pause(paused bool) {
 		s.started = now.Add(-time.Duration(s.pausedPosition) * time.Millisecond)
 	}
 	if s.current.ID == "" {
-		s.advanceLocked()
+		s.advanceLocked("")
 	} else {
 		s.saveLocked()
 	}
@@ -271,10 +330,8 @@ func (s *State) Skip() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.votes = map[string]bool{}
-	s.current = library.Track{}
-	s.started = time.Time{}
 	s.pausedPosition = 0
-	s.advanceLocked()
+	s.finishCurrentLocked()
 }
 
 func (s *State) Request(track library.Track, nickname, clientKey string) {
@@ -319,7 +376,7 @@ func (s *State) Request(track library.Track, nickname, clientKey string) {
 		DurationMS: track.DurationMS, DurationEstimated: track.DurationMS <= 0,
 	})
 	s.reorderQueueLocked()
-	s.advanceLocked()
+	s.advanceLocked("")
 	s.saveLocked()
 }
 
@@ -726,9 +783,7 @@ func (s *State) Vote(client string) (bool, bool) {
 	s.votes[client] = true
 	if len(s.votes) >= s.voteNeededLocked() {
 		s.votes = map[string]bool{}
-		s.current = library.Track{}
-		s.started = time.Time{}
-		s.advanceLocked()
+		s.finishCurrentLocked()
 		return true, true
 	}
 	return true, false

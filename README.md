@@ -46,6 +46,18 @@ go run ./cmd/station
 
 Open <http://127.0.0.1:8091/>.
 
+To serve the same station to other devices on the LAN, listen on all
+interfaces instead of loopback:
+
+```bash
+RADIO_GO_ADDR=0.0.0.0:8091 ./scripts/dev-local.sh
+```
+
+Only `127.0.0.1`/`::1` are owner by default, so LAN clients get the listener
+view; add their addresses to `RADIO_OWNER_IPS` if they should manage the
+station. `scripts/dev-local.sh` is a thin wrapper that sets `0.0.0.0:8091`,
+`data/bin` on `PATH` for ffmpeg and a local admin token.
+
 The default static directory is `web/static`. The optional commercial helper is
 looked up at `plugins/commercial/helper.py`; without it the station still works
 with the local library, but NetEase/QQ/Bilibili sources are unavailable.
@@ -77,6 +89,9 @@ RADIO_DIRECTORY_URL=https://join.example.com
 RADIO_DIRECTORY_REGISTER_TOKEN=...
 RADIO_DIRECTORY_PUBLIC_URL=https://station.example.com   # direct station URL
 RADIO_JOIN_REQUIRED=1
+RADIO_FFMPEG=/usr/local/bin/ffmpeg          # optional explicit tool paths
+RADIO_FFPROBE=/usr/local/bin/ffprobe
+RADIO_GO_KEEP_UPLOADS=1                     # keep one-shot uploads after playback
 ```
 
 Relay variables:
@@ -98,6 +113,15 @@ RELAY_PORT=9443
 RELAY_TOKEN=...
 RELAY_LOCAL=127.0.0.1:8091
 ```
+
+## Uploads
+
+`POST /api/upload` accepts mp3/aac/m4a/mp4/ogg/oga/opus/wav/flac/webm up to
+64MB and places the track in the point-request queue. Title, artist and
+duration come from the listener's headers first, then from the file's own tags;
+a `<file>.json` sidecar next to the stored audio keeps that metadata across
+rescans. Files are one-shot by default: they are removed after playback (or
+when skipped) and swept after 24 hours.
 
 ## Optional commercial helper
 

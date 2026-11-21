@@ -115,7 +115,6 @@ const state = {
   sourceIndex: 0,
   clockOffset: 0,
   userWantsPlay: false,
-  localPausedPositionMs: null,
   pendingSeekMs: 0,
   lastLoadedSeq: null,
   lyricsTrackId: null,
@@ -124,6 +123,7 @@ const state = {
   lastLyricIndex: -1,
   lyricsManualAt: 0,
   lyricsManualTimer: null,
+  lyricsSuspendUntil: 0,
   lyricProgrammaticUntil: 0,
   lastPositionSec: -1,
   lastReportKey: null,
@@ -564,9 +564,21 @@ function loadTheme() {
   }
 }
 
+/* Same gate mesh.js uses internally: MediaSource with a codec we can mux, plus
+   WebRTC and a websocket. `isSupported` is the only capability the mesh exposes
+   publicly. */
+function meshUsable() {
+  if (!mesh || typeof mesh.isSupported !== "function") return false;
+  return Boolean(mesh.isSupported() && window.RTCPeerConnection && window.WebSocket);
+}
+
 function applyConfig(config) {
   state.uiConfig = config;
   state.mediaMode = config && config.media_mode === "p2p" ? "p2p" : "direct";
+  // A browser without WebRTC/MSE (iOS Safari on a plain-http LAN address, for
+  // one) can never join the mesh. Keeping p2p mode would just leave it silent,
+  // so such clients are served the direct stream instead.
+  if (state.mediaMode === "p2p" && !meshUsable()) state.mediaMode = "direct";
   stationName.textContent = config.station_name || "猫娘电台";
   stationSubtitle.textContent = config.subtitle || "";
   // The top bar stays compact; the subtitle lives in the browser tab as
@@ -1202,6 +1214,12 @@ function loadSource(positionMs) {
     return true;
   }
   if (state.mediaMode === "p2p") {
+    if (!meshUsable()) {
+      // The mesh cannot work in this browser; fall back instead of going quiet.
+      state.mediaMode = "direct";
+      loadDirectSource(positionMs);
+      return false;
+    }
     state.audioState = "error";
     refreshStatus();
     return false;
@@ -1219,8 +1237,15 @@ if (mesh) {
       refreshStatus();
     });
   }
-  mesh.setFallbackCallback(() => {
+  mesh.setFallbackCallback((reason) => {
     if (!state.now || !state.now.track) return;
+    if (state.mediaMode === "p2p" && (
+      reason === "unsupported" || reason === "webrtc_unsupported" || !meshUsable()
+    )) {
+      // Capability failure (no MediaSource / no RTCPeerConnection): retrying the
+      // mesh forever is what left phones with a silent player.
+      state.mediaMode = "direct";
+    }
     if (state.mediaMode === "p2p") {
       // Never fall back to /native through the VPS. Retry the P2P mesh; a
       // local host seed or a peer relay is the only legal media source.
@@ -1271,7 +1296,6 @@ function seekToLive() {
     // A live HTTP source may not expose a seekable duration. Re-open it at
     // the authoritative position instead of resuming from stale media time.
     if (state.sources.length) {
-      state.localPausedPositionMs = null;
       loadDirectSource(live);
       attemptPlay();
     }
@@ -1790,6 +1814,10 @@ function applyNow(now) {
   state.serverPaused = Boolean(now.paused);
   updateListenerUI(now);
   if (mesh) mesh.update(now);
+  // A live WebRTC audio track keeps playing across a track change (the station
+  // swaps the RTP feed in place). Re-running the HTTP/preload paths here only
+  // tore the element down.
+  const meshStreaming = Boolean(mesh && mesh.isActive() && audio && audio.srcObject);
 
   if (!now.track) {
     if (mesh) mesh.stop();
@@ -1838,7 +1866,6 @@ function applyNow(now) {
     state.lyricsTrackId = now.track.id;
     state.lastReportKey = null;
     state.lastPositionSec = -1;
-    state.localPausedPositionMs = null;
     state.preloadAttempts = 0;
     state.preloadRetryAt = 0;
     if (mesh) mesh.setPaused(false);
@@ -1859,6 +1886,10 @@ function applyNow(now) {
       crossfadeToUrl(sources[0], startPosition)
     ) {
       // A not-yet-ready direct source still overlaps the old audio.
+    } else if (state.userWantsPlay && meshStreaming) {
+      // P2P track: keep the attached stream, just make sure it is running.
+      updateAudioMode();
+      if (audio.paused) attemptPlay();
     } else if (state.userWantsPlay && sources.length) {
       loadSource(startPosition);
     } else {
@@ -1877,6 +1908,10 @@ function applyNow(now) {
       adoptPreloaded(sources[0], currentPosition(now))
     ) {
       // Source refresh can also use the preloaded buffer.
+    } else if (state.userWantsPlay && meshStreaming) {
+      // Same P2P track, new audio revision: keep the element as it is.
+      updateAudioMode();
+      if (audio.paused) attemptPlay();
     } else if (state.userWantsPlay && sources.length) {
       loadSource(currentPosition(now));
     } else {
@@ -1889,6 +1924,8 @@ function applyNow(now) {
   if (state.serverPaused) {
     audio.pause();
     clearStalledTimer();
+  } else if (state.userWantsPlay && meshStreaming) {
+    if (audio.paused) attemptPlay();
   } else if (state.userWantsPlay && !audio.src) {
     ensureSourceLoaded(now);
   } else if (state.userWantsPlay && audio.paused) {
@@ -1896,7 +1933,7 @@ function applyNow(now) {
     attemptPlay();
   }
 
-  if (state.userWantsPlay && !audio.src && !audio.srcObject && state.sources.length) {
+  if (state.userWantsPlay && !audio.src && !audio.srcObject && !meshStreaming && state.sources.length) {
     loadSource(currentPosition(now));
   }
   syncPlaybackPosition(now);
@@ -1982,6 +2019,9 @@ function setLyricsEmpty(text) {
   currentLyricText.textContent = text;
   currentLyricTrans.textContent = "";
   currentLyricTrans.classList.add("hidden");
+  // Centre the placeholder even when the panel was already visible (landscape
+  // keeps it open, so setLyricsOpen() is not called on a track change).
+  normalizeLyricsLayout();
 }
 
 function parseLrc(text) {
@@ -2038,23 +2078,29 @@ function renderLyrics(lrc, translation) {
   for (const line of lines) {
     const row = document.createElement("div");
     row.className = "lyric-line";
+    // Shrink-wrapped wrapper so the active-line scale can grow around the text
+    // itself instead of the full-width block (which would overflow the column).
+    const inner = document.createElement("span");
+    inner.className = "lyric-inner";
     const text = document.createElement("span");
     text.className = "lyric-text";
     text.textContent = line.text;
-    row.appendChild(text);
+    inner.appendChild(text);
     const trans = nearestTranslation(translations, line.time);
     if (trans) {
       const sub = document.createElement("span");
       sub.className = "lyric-translation";
       sub.textContent = trans;
-      row.appendChild(sub);
+      inner.appendChild(sub);
     }
+    row.appendChild(inner);
     fragment.appendChild(row);
     state.lyricEls.push(row);
   }
   lyricsEl.textContent = "";
   lyricsEl.appendChild(fragment);
   normalizeLyricsLayout();
+  requestAnimationFrame(normalizeLyricsLayout);
   lyricsEl.classList.toggle("hide-translation", !state.showTranslation);
   currentLyricText.textContent = "";
   currentLyricTrans.textContent = "";
@@ -2076,14 +2122,105 @@ async function loadLyrics(url, trackId) {
   }
 }
 
+/* In landscape the lyric column spans the full stage height, so centring the
+   live line inside it landed ~50px below the artwork's midline. Align the whole
+   window (fade bounds included) with the cover centre instead: the window keeps
+   a symmetric height around that line and the toggle button stays on its bottom
+   edge. Portrait keeps its own inline layout, untouched. */
+function alignLyricsWindow() {
+  if (!lyricsPanel) return;
+  const landscape = window.matchMedia("(orientation: landscape)").matches;
+  if (!landscape) {
+    lyricsPanel.style.removeProperty("height");
+    lyricsPanel.style.removeProperty("flex");
+    lyricsPanel.style.removeProperty("margin-top");
+    return;
+  }
+  const track = lyricsPanel.parentElement;
+  const cover = document.querySelector(".cover-button");
+  if (!track || !cover || cover.offsetParent === null) return;
+  const bounds = track.getBoundingClientRect();
+  const art = cover.getBoundingClientRect();
+  const center = art.top + art.height / 2;
+  const above = center - bounds.top;
+  const below = bounds.bottom - center;
+  const half = Math.min(above, below);
+  if (!(half > 60)) {
+    // Too little room for a meaningful window (very short viewport): fall back
+    // to the plain column instead of keeping a stale inline height.
+    lyricsPanel.style.removeProperty("height");
+    lyricsPanel.style.removeProperty("flex");
+    lyricsPanel.style.removeProperty("margin-top");
+    return;
+  }
+  // The scroll box sits `inset` px below the panel top, so it has to be that
+  // much shorter for its own centre to land on the artwork's midline.
+  const inset = lyricsScroll ? Math.max(0, lyricsScroll.offsetTop) : 0;
+  lyricsPanel.style.height = `${Math.max(160, Math.round(half * 2 - inset))}px`;
+  lyricsPanel.style.flex = "0 0 auto";
+  lyricsPanel.style.marginTop = `${Math.round(above - half)}px`;
+}
+
 function normalizeLyricsLayout() {
-  // Keep a small, content-bounded scroll range even if an older cached
-  // stylesheet still carries the former 45%/32% vertical padding.
   if (!lyricsEl || !lyricsScroll) return;
-  lyricsEl.style.setProperty("padding-top", "0", "important");
-  lyricsEl.style.setProperty("padding-bottom", "0", "important");
-  lyricsScroll.style.setProperty("padding-top", "20px", "important");
-  lyricsScroll.style.setProperty("padding-bottom", "20px", "important");
+  alignLyricsWindow();
+  // Symmetric padding lets the first and the last line reach the vertical
+  // centre; without it the list hugged the top and bottom edges and only the
+  // fade mask hinted where the "window" was. Half the container height is
+  // independent of the row height, so re-running this after a resize or a
+  // panel toggle cannot shift the scroll offset by a few pixels.
+  const height = lyricsScroll.clientHeight;
+  const pad = height > 0 ? Math.round(height / 2) : 0;
+  lyricsEl.classList.toggle("is-empty", !state.lyricEls.length);
+  if (!state.lyricEls.length) {
+    lyricsEl.style.setProperty("padding-top", "0", "important");
+    lyricsEl.style.setProperty("padding-bottom", "0", "important");
+  } else {
+    lyricsEl.style.setProperty("padding-top", `${pad}px`, "important");
+    lyricsEl.style.setProperty("padding-bottom", `${pad}px`, "important");
+  }
+  lyricsScroll.style.setProperty("padding-top", "0", "important");
+  lyricsScroll.style.setProperty("padding-bottom", "0", "important");
+  // The window may have just been re-sized (open/close, rotation, first paint).
+  // Re-anchor instantly so the live line stays on the artwork's midline instead
+  // of keeping an offset computed for the previous height.
+  const active = state.lyricEls[state.lastLyricIndex];
+  if (active && lyricsScroll.clientHeight > 0) {
+    scrollLyricsTo(lyricsScrollTarget(active), "auto");
+  }
+}
+
+function lyricsScrollTarget(row) {
+  if (!row || !lyricsScroll) return 0;
+  // Centre the active line instead of parking it at 42% of the viewport.
+  return Math.max(0, row.offsetTop - (lyricsScroll.clientHeight - row.clientHeight) / 2);
+}
+
+/* How much the active line may grow without spilling out of its column.
+   Scaling is capped per line: a line that already fills the width stays at 1. */
+function lyricGrowFor(row) {
+  const inner = row.querySelector(".lyric-inner");
+  if (!inner) return 1;
+  const style = getComputedStyle(row);
+  const padLeft = parseFloat(style.paddingLeft) || 0;
+  const padRight = parseFloat(style.paddingRight) || 0;
+  const available = row.clientWidth - padLeft - padRight;
+  if (available <= 0) return 1;
+  // The widest rendered line decides the cap: a wrapped line whose longest row
+  // is narrower than the column can still grow a little without spilling.
+  let natural = 0;
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(inner);
+    for (const rect of range.getClientRects()) {
+      if (rect.width > natural) natural = rect.width;
+    }
+  } catch (_) {
+    natural = inner.offsetWidth;
+  }
+  if (!natural || natural >= available - 1) return 1;
+  const max = parseFloat(style.getPropertyValue("--lyric-grow-max")) || 1.16;
+  return Math.min(max, available / natural);
 }
 
 function updateLyrics(positionMs) {
@@ -2098,10 +2235,10 @@ function updateLyrics(positionMs) {
   state.lastLyricIndex = index;
   const active = state.lyricEls[index];
   if (active) {
+    active.style.setProperty("--lyric-grow", lyricGrowFor(active).toFixed(3));
     active.classList.add("active");
-    if (Date.now() - state.lyricsManualAt >= 4500) {
-      const top = active.offsetTop - lyricsScroll.clientHeight * 0.42 + active.clientHeight / 2;
-      scrollLyricsTo(top, "smooth");
+    if (Date.now() >= state.lyricsSuspendUntil && Date.now() - state.lyricsManualAt >= 4500) {
+      scrollLyricsTo(lyricsScrollTarget(active), "smooth");
     }
   }
   syncCurrentLyric(index, true);
@@ -2139,8 +2276,10 @@ function refreshCurrentLyric(instant = false) {
   syncCurrentLyric(state.lastLyricIndex, true);
   const active = state.lyricEls[state.lastLyricIndex];
   if (active) {
-    const top = active.offsetTop - lyricsScroll.clientHeight * 0.42 + active.clientHeight / 2;
-    scrollLyricsTo(top, instant ? "auto" : "smooth");
+    // The panel size (and with it the font size and available width) changes
+    // when it opens or the window resizes; the allowed growth must follow.
+    active.style.setProperty("--lyric-grow", lyricGrowFor(active).toFixed(3));
+    scrollLyricsTo(lyricsScrollTarget(active), instant ? "auto" : "smooth");
   }
 }
 
@@ -2150,8 +2289,14 @@ function scrollLyricsTo(top, behavior) {
 }
 
 function markLyricsManualScroll() {
+  // Layout changes (opening/closing the panel, resizing) move the scroll
+  // position on their own; that is not the listener scrolling.
+  if (Date.now() < state.lyricsSuspendUntil) return;
   const landscapeLyrics = window.matchMedia("(orientation: landscape)").matches;
-  if (!state.lyricsOpen && !landscapeLyrics) return;
+  // Portrait now shows the lyric window inline, so a manual scroll there must
+  // pause the auto-centring too.
+  const inlineLyrics = Boolean(lyricsScroll && lyricsScroll.clientHeight > 0);
+  if (!state.lyricsOpen && !landscapeLyrics && !inlineLyrics) return;
   state.lyricsManualAt = Date.now();
   clearTimeout(state.lyricsManualTimer);
   state.lyricsManualTimer = setTimeout(() => {
@@ -2348,17 +2493,26 @@ function setLyricsOpen(open) {
     "aria-label",
     state.lyricsOpen ? "收起完整歌词" : "展开歌词",
   );
-  if (state.lyricsOpen) {
+  clearTimeout(state.lyricsManualTimer);
+  state.lyricsManualAt = 0;
+  // The panel changes size the moment the class flips, and the browser fires a
+  // scroll event for the shifted content. Freeze auto/manual scroll handling
+  // until the new geometry is in place, then jump straight to the live line
+  // instead of gliding from the stale offset.
+  state.lyricsSuspendUntil = Date.now() + 700;
+  const settleLyrics = () => {
     normalizeLyricsLayout();
-    state.lyricsManualAt = 0;
-    clearTimeout(state.lyricsManualTimer);
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => refreshCurrentLyric(true));
-    });
-  } else {
-    clearTimeout(state.lyricsManualTimer);
-    state.lyricsManualAt = 0;
-  }
+    refreshCurrentLyric(true);
+  };
+  requestAnimationFrame(() => {
+    settleLyrics();
+    requestAnimationFrame(settleLyrics);
+  });
+  setTimeout(() => {
+    if (state.lyricsOpen !== Boolean(open)) return;
+    settleLyrics();
+    state.lyricsSuspendUntil = 0;
+  }, 420);
 }
 
 function onPageWheel(event) {
@@ -2571,7 +2725,16 @@ function renderHistory(items) {
     duration.textContent = fmtTime(item.duration_ms, item.duration_estimated);
     side.appendChild(duration);
     const add = rowAction("再次点歌", ["M12 5v14M5 12h14"], "add");
-    add.addEventListener("click", () => requestTrack(item.track_id || item.id, item));
+    if (String(item.source || "").toLowerCase() === "upload") {
+      // One-shot upload: the file is gone after playback, so re-requesting it
+      // can only produce a dead queue entry.
+      add.disabled = true;
+      add.setAttribute("aria-disabled", "true");
+      add.title = "上传曲目只播放一次，无法再次点歌";
+      add.setAttribute("aria-label", add.title);
+    } else {
+      add.addEventListener("click", () => requestTrack(item.track_id || item.id, item));
+    }
     side.appendChild(add);
     row.appendChild(side);
     historyList.appendChild(row);
@@ -2634,7 +2797,10 @@ async function loadSidebar() {
   if (state.sidebarLoading) return;
   state.sidebarLoading = true;
   try {
-    const data = await fetchJSON("/api/state", { timeout: 8_000 });
+    const nicknameQuery = state.nickname
+      ? `?nickname=${encodeURIComponent(state.nickname)}`
+      : "";
+    const data = await fetchJSON(`/api/state${nicknameQuery}`, { timeout: 8_000 });
     const active = new Set();
     const current = data.now && data.now.track;
     if (current && current.id) active.add(String(current.id));
@@ -2778,6 +2944,12 @@ function requestCandidate(item, button) {
 
 function requestTrack(trackId, item, button) {
   if (!trackId) return;
+  if (item && String(item.source || "").toLowerCase() === "upload") {
+    // Uploads are deleted after they play once, so queueing them again would
+    // only create a request that can never be played.
+    showToast("上传曲目只播放一次，不能再次点歌");
+    return;
+  }
   submitRequest(
     { track_id: trackId, nickname: state.nickname, ts: state.requestTs },
     item,
@@ -2917,7 +3089,8 @@ async function uploadLocalAudio(file) {
     });
     setView("queue");
     setSearchStatus("");
-    showToast("上传成功");
+    const uploadedTitle = data && data.track ? String(data.track.title || "") : "";
+    showToast(uploadedTitle ? `已加入点歌队列：${uploadedTitle}` : "已加入点歌队列");
     loadSidebar();
     pollSoon();
   } catch (error) {
@@ -3052,14 +3225,8 @@ function updateMediaSessionPosition(now = state.now) {
   const timestamp = Date.now();
   if (timestamp - state.lastMediaPositionAt < 5_000) return;
   const duration = Number(now.duration_ms) || 0;
-  const locallyPaused = state.serverPaused || !state.userWantsPlay || audio.paused;
-  const useLocal = Boolean(audio.src) && audio.readyState > 0;
-  const position =
-    locallyPaused && state.localPausedPositionMs !== null
-      ? state.localPausedPositionMs
-      : locallyPaused && useLocal
-      ? audio.currentTime * 1000
-      : currentPosition(now);
+  // Same rule as the on-screen progress: the server clock is authoritative.
+  const position = currentPosition(now);
   if (duration <= 0 || !Number.isFinite(position)) return;
   state.lastMediaPositionAt = timestamp;
   try {
@@ -3085,7 +3252,6 @@ function setupMediaSession() {
   register("play", () => {
     if (!state.now || !state.now.track || state.serverPaused) return;
     state.userWantsPlay = true;
-    state.localPausedPositionMs = null;
     if (mesh) mesh.setPaused(false);
     if (!ensureSourceLoaded()) {
       seekToLive();
@@ -3094,7 +3260,6 @@ function setupMediaSession() {
     updatePlayButton();
   });
   register("pause", () => {
-    state.localPausedPositionMs = currentPosition(state.now);
     state.userWantsPlay = false;
     if (mesh) mesh.setPaused(true);
     audio.pause();
@@ -3122,20 +3287,11 @@ function frame() {
   if (document.hidden) return;
   const now = state.now;
   if (now && now.track) {
-    const useLocal = Boolean(audio.src) && audio.readyState > 0;
-    const locallyPaused = state.serverPaused || !state.userWantsPlay || audio.paused;
-    // While playing, the server timeline is authoritative so two clients
-    // cannot show different progress. A locally paused reader keeps the
-    // position captured at the moment pause was pressed, not raw media time
-    // (which is relative to a P2P/MSE stream that may have started late).
-    const pausedPosition =
-      state.serverPaused
-        ? currentPosition(now)
-        : state.localPausedPositionMs;
-    const position =
-      locallyPaused && pausedPosition !== null
-        ? Math.max(0, pausedPosition)
-        : currentPosition(now);
+    // The station keeps playing while this client is paused, so the timeline
+    // must keep following the server too. Freezing it at the moment pause was
+    // pressed made the progress bar (and the lyrics) sit still and then jump
+    // forward on resume, which read as the position being out of sync.
+    const position = currentPosition(now);
     const duration = Number(now.duration_ms) || 0;
     const percent = duration > 0 ? clamp((position / duration) * 100, 0, 100) : 0;
     progressFill.style.width = `${percent.toFixed(2)}%`;
@@ -3156,7 +3312,6 @@ function frame() {
 playBtn.addEventListener("click", () => {
   if (!state.now || !state.now.track || state.serverPaused) return;
   if (!audio.paused) {
-    state.localPausedPositionMs = currentPosition(state.now);
     state.userWantsPlay = false;
     // Keep the mesh source pump alive while paused. The server timeline
     // continues, and retaining the incoming MSE buffer lets resume seek to
@@ -3173,7 +3328,6 @@ playBtn.addEventListener("click", () => {
     return;
   }
   state.userWantsPlay = true;
-  state.localPausedPositionMs = null;
   if (mesh) {
     mesh.setPaused(false);
     mesh.setWanted(true);
@@ -3195,8 +3349,12 @@ function updateMuteUI() {
   const muted = Boolean(audio.muted);
   muteBtn.classList.toggle("muted", muted);
   muteBtn.setAttribute("aria-pressed", String(muted));
-  muteBtn.setAttribute("aria-label", muted ? "取消静音" : "静音");
-  muteBtn.title = muted ? "取消静音" : "静音";
+  // On touch layouts the same control only opens the slider, so it must not be
+  // announced as a mute switch.
+  const portrait = portraitMedia.matches;
+  const label = portrait ? "音量调节" : muted ? "取消静音" : "静音";
+  muteBtn.setAttribute("aria-label", label);
+  muteBtn.title = label;
   if (volumeOnIcon) volumeOnIcon.classList.toggle("hidden", muted);
   if (volumeOffIcon) volumeOffIcon.classList.toggle("hidden", !muted);
 }
@@ -3210,25 +3368,12 @@ function setVolumePanel(open) {
 
 muteBtn.addEventListener("click", () => {
   if (portraitMedia.matches) {
-    // Three-state cycle while the slider is collapsed:
-    // hidden+sound -> open+sound -> hidden+muted -> hidden+sound ...
-    // If the user is already muted, the first tap restores sound instead of
-    // opening the slider.
-    if (audio.muted) {
-      audio.muted = false;
-      audio.volume = clamp(Number(volumeEl.value), 0, 1);
-      setVolumePanel(false);
-      updateMuteUI();
-      return;
-    }
-    if (!volumePanelOpen) {
-      setVolumePanel(true);
-      updateMuteUI();
-      return;
-    }
-    audio.muted = true;
-    setVolumePanel(false);
-    updateMuteUI();
+    // Touch layouts: the button only opens/closes the slider. It used to cycle
+    // open -> mute, so a tap meant to expand the slider could land on the mute
+    // branch and cut the sound instead (double taps and touch→click retargeting
+    // made it intermittent). Dragging the slider still unmutes, so no state is
+    // unreachable.
+    setVolumePanel(!volumePanelOpen);
     return;
   }
   audio.muted = !audio.muted;
@@ -3249,7 +3394,10 @@ document.addEventListener("pointerdown", (event) => {
 });
 
 if (portraitMedia.addEventListener) {
-  portraitMedia.addEventListener("change", () => setVolumePanel(false));
+  portraitMedia.addEventListener("change", () => {
+    setVolumePanel(false);
+    updateMuteUI();
+  });
 }
 updateMuteUI();
 
@@ -3260,6 +3408,22 @@ lyricsScroll.addEventListener("scroll", () => {
   if (Date.now() < state.lyricProgrammaticUntil) return;
   markLyricsManualScroll();
 }, { passive: true });
+
+// The lyric window changes size when the panel opens or the viewport rotates.
+// Re-centre in the same frame the height changes so the live line never drifts
+// to a stale offset (the "it scrolled by itself" jump).
+if (typeof ResizeObserver === "function") {
+  let lastLyricsHeight = 0;
+  const lyricsResizeObserver = new ResizeObserver(() => {
+    const height = lyricsScroll.clientHeight;
+    if (height <= 0 || height === lastLyricsHeight) return;
+    lastLyricsHeight = height;
+    normalizeLyricsLayout();
+    refreshCurrentLyric(true);
+    state.lyricProgrammaticUntil = Date.now() + 200;
+  });
+  lyricsResizeObserver.observe(lyricsScroll);
+}
 
 translationToggle.addEventListener("click", () => {
   state.showTranslation = !state.showTranslation;
@@ -3300,6 +3464,7 @@ stage.addEventListener("touchmove", onTouchMove, { passive: false });
 stage.addEventListener("touchend", onTouchEnd, { passive: true });
 window.addEventListener("resize", () => {
   normalizeLyricsLayout();
+  refreshCurrentLyric(true);
   if (window.matchMedia("(orientation: landscape)").matches && state.lyricsOpen) {
     setLyricsOpen(false);
   }
